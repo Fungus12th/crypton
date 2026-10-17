@@ -22,11 +22,6 @@ dependencies = [
     "google-auth-httplib2>=0.1.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.0.0",
-    "pyinstaller>=6.0.0",
-]
 
 [project.scripts]
 crypton = "crypton.main:main"

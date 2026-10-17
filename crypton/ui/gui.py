@@ -170,26 +170,14 @@ class CryptonApp(ctk.CTk):
         self.btn_select_drive = ctk.CTkButton(
             self.top_frame,
             text="Change Drive",
-            width=100,
+            width=110,
             height=30,
             fg_color=THEME["secondary"],
             hover_color=THEME["secondary_hover"],
             text_color="#FFFFFF",
             command=self.change_drive,
         )
-        self.btn_select_drive.pack(side="right", padx=(5, 10), pady=10)
-
-        self.btn_dev = ctk.CTkButton(
-            self.top_frame,
-            text="Settings",
-            width=80,
-            height=30,
-            fg_color=THEME["secondary"],
-            hover_color=THEME["secondary_hover"],
-            text_color="#FFFFFF",
-            command=self.open_dev_settings,
-        )
-        self.btn_dev.pack(side="right", padx=(5, 0), pady=10)
+        self.btn_select_drive.pack(side="right", padx=10, pady=10)
 
         # Dynamic Content Container
         self.content_container = ctk.CTkFrame(
