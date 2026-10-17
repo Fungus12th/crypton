@@ -21,12 +21,85 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 
+def apply_dark_title_bar(window):
+    """Enable native dark mode title bar on Windows 10/11."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        window.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        if hwnd == 0:
+            hwnd = window.winfo_id()
+        value = ctypes.c_int(2)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(value), ctypes.sizeof(value))
+    except Exception:
+        pass
+
+
+def _init_windows_dpi():
+    """Enable high-DPI scaling on Windows."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
+
+_init_windows_dpi()
+
+
+def get_asset_path(filename: str) -> str:
+    """Get absolute path to an asset, handling both development and PyInstaller bundles."""
+    if hasattr(sys, "_MEIPASS"):
+        p = os.path.join(sys._MEIPASS, "crypton", "assets", filename)
+        if os.path.isfile(p):
+            return p
+        p_root = os.path.join(sys._MEIPASS, filename)
+        if os.path.isfile(p_root):
+            return p_root
+
+    dev_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", filename)
+    if os.path.isfile(dev_path):
+        return dev_path
+
+    root_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", filename)
+    if os.path.isfile(root_path):
+        return root_path
+
+    return filename
+
+
+def set_window_icon(window):
+    """Set the application window icon if available across Windows and Linux."""
+    try:
+        if sys.platform == "win32":
+            ico = get_asset_path("crypton.ico")
+            if os.path.isfile(ico):
+                window.iconbitmap(ico)
+        else:
+            png = get_asset_path("crypton.png")
+            if os.path.isfile(png):
+                import tkinter as tk
+                img = tk.PhotoImage(file=png)
+                window.iconphoto(True, img)
+    except Exception:
+        pass
+
+
 class CryptonApp(ctk.CTk):
     def __init__(self, initial_dir: str = "."):
         super().__init__()
         self.title("Crypton - Secure USB Vault")
-        self.geometry("560 x 440")
+        self.geometry("560x440")
         self.minsize(520, 400)
+        apply_dark_title_bar(self)
+        set_window_icon(self)
 
         self.drive_path = os.path.abspath(initial_dir)
         self.mvk = None
@@ -277,6 +350,7 @@ class CryptonApp(ctk.CTk):
         self.mvk = mvk
         self.mountpoint = mountpoint
         self.refresh_state()
+        self.open_file_manager()
 
     def on_unlock_bad_password(self):
         self.btn_unlock.configure(state="normal")
@@ -292,8 +366,9 @@ class CryptonApp(ctk.CTk):
     def render_unlocked_view(self):
         icon = ctk.CTkLabel(
             self.content_container,
-            text="🟢",
-            font=ctk.CTkFont(size=36),
+            text="●",
+            font=ctk.CTkFont(size=40),
+            text_color="#2ecc71",
         )
         icon.pack(pady=(25, 5))
 
@@ -406,6 +481,8 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()
+        apply_dark_title_bar(self)
+        set_window_icon(self)
 
         self.drive_path = drive_path
         self.settings = VaultManager.get_settings(drive_path)
@@ -605,6 +682,8 @@ class GDriveSyncDialog(ctk.CTkToplevel):
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()
+        apply_dark_title_bar(self)
+        set_window_icon(self)
 
         self.master_app = master
         self.drive_path = drive_path

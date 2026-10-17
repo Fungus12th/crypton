@@ -386,24 +386,30 @@ class GDriveSync:
         file_size = os.path.getsize(local_path)
         resumable = file_size > 5 * 1024 * 1024
         media = MediaFileUpload(local_path, mimetype="application/octet-stream", resumable=resumable)
+        try:
+            if existing_id:
+                updated = service.files().update(fileId=existing_id, media_body=media, fields="id").execute()
+                return updated["id"]
 
-        if existing_id:
-            updated = service.files().update(fileId=existing_id, media_body=media, fields="id").execute()
-            return updated["id"]
+            safe_name = filename.replace("'", "\\'")
+            query = f"name = '{safe_name}' and '{parent_id}' in parents and trashed = false"
+            res = service.files().list(q=query, spaces="drive", fields="files(id)").execute()
+            existing = res.get("files", [])
 
-        safe_name = filename.replace("'", "\\'")
-        query = f"name = '{safe_name}' and '{parent_id}' in parents and trashed = false"
-        res = service.files().list(q=query, spaces="drive", fields="files(id)").execute()
-        existing = res.get("files", [])
-
-        if existing:
-            file_id = existing[0]["id"]
-            updated = service.files().update(fileId=file_id, media_body=media, fields="id").execute()
-            return updated["id"]
-        else:
-            meta = {"name": filename, "parents": [parent_id]}
-            created = service.files().create(body=meta, media_body=media, fields="id").execute()
-            return created["id"]
+            if existing:
+                file_id = existing[0]["id"]
+                updated = service.files().update(fileId=file_id, media_body=media, fields="id").execute()
+                return updated["id"]
+            else:
+                meta = {"name": filename, "parents": [parent_id]}
+                created = service.files().create(body=meta, media_body=media, fields="id").execute()
+                return created["id"]
+        finally:
+            if hasattr(media, "_fd") and media._fd:
+                try:
+                    media._fd.close()
+                except Exception:
+                    pass
 
     def get_sync_status(self, drive_path: str) -> Dict[str, Any]:
         """Inspect local vault and Google Drive to report pending delta counts."""
@@ -511,13 +517,19 @@ class GDriveSync:
 
             dir_part, file_name = os.path.split(c)
             target_parent_id = self.get_or_create_remote_path(data_id, dir_part)
-
             file_size = os.path.getsize(chunk_path)
             resumable = file_size > 5 * 1024 * 1024
             media = MediaFileUpload(chunk_path, mimetype="application/octet-stream", resumable=resumable)
-            meta = {"name": file_name, "parents": [target_parent_id]}
-            service.files().create(body=meta, media_body=media, fields="id").execute()
-            uploaded_count += 1
+            try:
+                meta = {"name": file_name, "parents": [target_parent_id]}
+                service.files().create(body=meta, media_body=media, fields="id").execute()
+                uploaded_count += 1
+            finally:
+                if hasattr(media, "_fd") and media._fd:
+                    try:
+                        media._fd.close()
+                    except Exception:
+                        pass
 
         # 4. Delete Obsolete Remote Chunks (Cut down Google Drive to match pendrive)
         deleted_count = 0

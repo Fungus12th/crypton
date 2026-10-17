@@ -14,6 +14,8 @@ for pkg in ['google_auth_oauthlib', 'googleapiclient']:
     except Exception:
         pass
 
+datas += [('crypton/assets', 'crypton/assets'), ('crypton.png', '.'), ('crypton.ico', '.')]
+
 
 a = Analysis(
     ['crypton/main.py'],

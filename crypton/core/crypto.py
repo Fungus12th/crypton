@@ -94,30 +94,25 @@ def encrypt_stream(
 
     chunk_idx = 0
     total_plaintext_bytes = 0
+    current_chunk = in_file.read(chunk_size)
 
     while True:
-        chunk = in_file.read(chunk_size)
-        total_plaintext_bytes += len(chunk)
-        
-        # Look ahead 1 byte to check if this is the last chunk
-        next_byte = in_file.read(1)
-        if next_byte:
-            # Not last chunk, seek back 1 byte
-            in_file.seek(-1, os.SEEK_CUR)
-            is_last = 0
-        else:
-            is_last = 1
+        total_plaintext_bytes += len(current_chunk)
+        next_chunk = in_file.read(chunk_size)
+        is_last = 1 if not next_chunk else 0
 
         chunk_nonce = _make_chunk_nonce(base_nonce, chunk_idx)
         aad = struct.pack(">IB", chunk_idx, is_last)
-        encrypted_chunk = aesgcm.encrypt(chunk_nonce, chunk, aad)
+        encrypted_chunk = aesgcm.encrypt(chunk_nonce, current_chunk, aad)
 
         out_file.write(struct.pack(">IBI", chunk_idx, is_last, len(encrypted_chunk)))
         out_file.write(encrypted_chunk)
 
-        chunk_idx += 1
         if is_last:
             break
+
+        current_chunk = next_chunk
+        chunk_idx += 1
 
     return total_plaintext_bytes
 
@@ -167,14 +162,14 @@ def decrypt_stream(in_file: BinaryIO, out_file: BinaryIO, file_key: bytes) -> in
 
 
 def encrypt_file(src_path: str, dst_path: str, file_key: bytes) -> int:
-    """Encrypt a file from src_path to dst_path."""
+    """Encrypt a file from src_path to dst_path with 256KB buffer."""
     os.makedirs(os.path.dirname(os.path.abspath(dst_path)), exist_ok=True)
-    with open(src_path, "rb") as f_in, open(dst_path, "wb") as f_out:
+    with open(src_path, "rb", buffering=256 * 1024) as f_in, open(dst_path, "wb", buffering=256 * 1024) as f_out:
         return encrypt_stream(f_in, f_out, file_key)
 
 
 def decrypt_file(src_path: str, dst_path: str, file_key: bytes) -> int:
-    """Decrypt a file from src_path to dst_path."""
+    """Decrypt a file from src_path to dst_path with 256KB buffer."""
     os.makedirs(os.path.dirname(os.path.abspath(dst_path)), exist_ok=True)
-    with open(src_path, "rb") as f_in, open(dst_path, "wb") as f_out:
+    with open(src_path, "rb", buffering=256 * 1024) as f_in, open(dst_path, "wb", buffering=256 * 1024) as f_out:
         return decrypt_stream(f_in, f_out, file_key)
