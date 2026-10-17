@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Packaging / Distribution / Binaries
+dist/
+build/
+*.egg-info/
+*.egg
+*.exe
+*.bin
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Encrypted Vault Data & Virtual Mounts (Never commit vault data)
+.crypton/
+Vault_Unlocked/
+*.enc
+vault.header
+README_HOW_TO_UNLOCK.txt
+
+# OS & Editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
