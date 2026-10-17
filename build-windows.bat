@@ -36,7 +36,7 @@ if %errorlevel% equ 0 (
     echo ===================================================
     if exist "dist\crypton-windows.exe" (
         copy /y "dist\crypton-windows.exe" "..\Crypton.exe"
-        copy /y "dist\crypton-windows.exe" "..\crypton-windows.exe"
+        if exist "..\crypton-windows.exe" del /f /q "..\crypton-windows.exe"
     )
     echo.
     echo Done! You can now double-click Crypton.exe on Windows.

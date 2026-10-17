@@ -27,7 +27,7 @@ hiddenimports = [
     'google.auth',
 ]
 
-for pkg in ('customtkinter', '_argon2_cffi_bindings', 'cryptography', 'google_auth_oauthlib', 'googleapiclient'):
+for pkg in ('customtkinter', '_argon2_cffi_bindings', 'cryptography', 'google_auth_oauthlib', 'googleapiclient', 'PIL'):
     try:
         ret = collect_all(pkg)
         datas += ret[0]
@@ -36,7 +36,7 @@ for pkg in ('customtkinter', '_argon2_cffi_bindings', 'cryptography', 'google_au
     except Exception:
         pass
 
-datas += [('crypton/assets', 'crypton/assets'), ('crypton.ico', '.')]
+datas += [('crypton/assets', 'crypton/assets'), ('crypton.ico', '.'), ('crypton.png', '.')]
 
 a = Analysis(
     ['crypton/main.py'],

@@ -17,8 +17,29 @@ if sys.platform == "win32":
 else:
     from crypton.core.fuse_vault import VaultMountService, FUSE
 
-ctk.set_appearance_mode("Dark")
+ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
+
+# Modern Light Sage / Emerald Theme Palette
+THEME = {
+    "bg": "#EDF5F0",             # Soft light sage / mint window background
+    "card_bg": "#FFFFFF",        # Crisp white container cards
+    "card_border": "#D2E4D8",    # Subtle pale sage border
+    "text_dark": "#163326",      # Deep forest charcoal for titles and bold text
+    "text_muted": "#406352",     # Sage slate for subtitles and hints
+    "entry_bg": "#FFFFFF",       # Entry background
+    "entry_border": "#9FC4AD",   # Entry border
+    "entry_placeholder": "#799A87",
+    "primary": "#10B981",        # Emerald Green (Unlock, Initialize, Save)
+    "primary_hover": "#059669",
+    "secondary": "#2D5A43",      # Forest slate (Dev, Change Drive, Refresh)
+    "secondary_hover": "#1E3E2E",
+    "danger": "#E05252",         # Warm coral / crimson (Lock & Close)
+    "danger_hover": "#C83E3E",
+    "cloud": "#16806E",          # Deep sea-green / teal (Sync)
+    "cloud_hover": "#116053",
+    "status_green": "#10B981",
+}
 
 
 def apply_dark_title_bar(window):
@@ -76,28 +97,42 @@ def get_asset_path(filename: str) -> str:
 
 
 def set_window_icon(window):
-    """Set the application window icon if available across Windows and Linux."""
+    """Set the application window icon across Windows and Linux with persistent reference."""
     try:
         if sys.platform == "win32":
             ico = get_asset_path("crypton.ico")
             if os.path.isfile(ico):
                 window.iconbitmap(ico)
-        else:
-            png = get_asset_path("crypton.png")
-            if os.path.isfile(png):
-                import tkinter as tk
-                img = tk.PhotoImage(file=png)
-                window.iconphoto(True, img)
+        png = get_asset_path("crypton.png")
+        if os.path.isfile(png):
+            from PIL import Image, ImageTk
+            img = ImageTk.PhotoImage(Image.open(png))
+            window._icon_photo = img
+            window.iconphoto(True, img)
     except Exception:
         pass
+
+
+def get_vault_logo_image(size=(52, 52)):
+    """Return a CTkImage of the copper bank vault door logo."""
+    png = get_asset_path("crypton.png")
+    if os.path.isfile(png):
+        try:
+            from PIL import Image
+            pil_img = Image.open(png)
+            return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
+        except Exception:
+            pass
+    return None
 
 
 class CryptonApp(ctk.CTk):
     def __init__(self, initial_dir: str = "."):
         super().__init__()
         self.title("Crypton - Secure USB Vault")
-        self.geometry("560x440")
-        self.minsize(520, 400)
+        self.geometry("560x450")
+        self.minsize(520, 420)
+        self.configure(fg_color=THEME["bg"])
         apply_dark_title_bar(self)
         set_window_icon(self)
 
@@ -110,13 +145,20 @@ class CryptonApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_window_close)
 
         # Top Bar: Drive Selector
-        self.top_frame = ctk.CTkFrame(self, corner_radius=10)
+        self.top_frame = ctk.CTkFrame(
+            self,
+            corner_radius=10,
+            fg_color=THEME["card_bg"],
+            border_width=1,
+            border_color=THEME["card_border"],
+        )
         self.top_frame.pack(fill="x", padx=15, pady=10)
 
         self.lbl_path = ctk.CTkLabel(
             self.top_frame,
             text=f"Drive: {self.drive_path}",
             font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=THEME["text_dark"],
             anchor="w",
         )
         self.lbl_path.pack(side="left", padx=15, pady=10, expand=True, fill="x")
@@ -126,23 +168,33 @@ class CryptonApp(ctk.CTk):
             text="Change Drive",
             width=100,
             height=30,
+            fg_color=THEME["secondary"],
+            hover_color=THEME["secondary_hover"],
+            text_color="#FFFFFF",
             command=self.change_drive,
         )
         self.btn_select_drive.pack(side="right", padx=(5, 10), pady=10)
 
         self.btn_dev = ctk.CTkButton(
             self.top_frame,
-            text="⚙️ Dev",
-            width=65,
+            text="Settings",
+            width=80,
             height=30,
-            fg_color="#34495e",
-            hover_color="#2c3e50",
+            fg_color=THEME["secondary"],
+            hover_color=THEME["secondary_hover"],
+            text_color="#FFFFFF",
             command=self.open_dev_settings,
         )
         self.btn_dev.pack(side="right", padx=(5, 0), pady=10)
 
         # Dynamic Content Container
-        self.content_container = ctk.CTkFrame(self, corner_radius=10)
+        self.content_container = ctk.CTkFrame(
+            self,
+            corner_radius=10,
+            fg_color=THEME["card_bg"],
+            border_width=1,
+            border_color=THEME["card_border"],
+        )
         self.content_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
 
         self.refresh_state()
@@ -172,65 +224,83 @@ class CryptonApp(ctk.CTk):
 
     # ================= VIEW 1: INITIALIZE DRIVE =================
     def render_init_view(self):
+        logo = get_vault_logo_image((54, 54))
+        if logo:
+            logo_lbl = ctk.CTkLabel(self.content_container, image=logo, text="")
+            logo_lbl.pack(pady=(18, 4))
+
         title = ctk.CTkLabel(
             self.content_container,
-            text="🛡️ Set Up Crypton Vault",
+            text="Set Up Crypton Vault",
             font=ctk.CTkFont(size=20, weight="bold"),
+            text_color=THEME["text_dark"],
         )
-        title.pack(pady=(30, 8))
+        title.pack(pady=(0 if logo else 25, 4))
 
         desc = ctk.CTkLabel(
             self.content_container,
             text="Set a master password to encrypt and password-protect this drive.",
             font=ctk.CTkFont(size=12),
-            text_color="gray70",
+            text_color=THEME["text_muted"],
         )
-        desc.pack(pady=(0, 20))
+        desc.pack(pady=(0, 15))
 
         self.init_pwd = ctk.CTkEntry(
             self.content_container,
             placeholder_text="Enter Master Password",
             show="*",
             width=320,
-            height=40,
+            height=38,
+            fg_color=THEME["entry_bg"],
+            border_color=THEME["entry_border"],
+            text_color=THEME["text_dark"],
+            placeholder_text_color=THEME["entry_placeholder"],
         )
-        self.init_pwd.pack(pady=8)
+        self.init_pwd.pack(pady=6)
 
         self.init_confirm = ctk.CTkEntry(
             self.content_container,
             placeholder_text="Confirm Master Password",
             show="*",
             width=320,
-            height=40,
+            height=38,
+            fg_color=THEME["entry_bg"],
+            border_color=THEME["entry_border"],
+            text_color=THEME["text_dark"],
+            placeholder_text_color=THEME["entry_placeholder"],
         )
-        self.init_confirm.pack(pady=8)
+        self.init_confirm.pack(pady=6)
 
         self.lbl_init_status = ctk.CTkLabel(
             self.content_container, text="", font=ctk.CTkFont(size=12)
         )
-        self.lbl_init_status.pack(pady=5)
+        self.lbl_init_status.pack(pady=3)
 
         self.btn_init = ctk.CTkButton(
             self.content_container,
-            text="🔒 Initialize & Protect Drive",
+            text="Initialize & Protect Drive",
             font=ctk.CTkFont(size=14, weight="bold"),
-            height=44,
+            height=42,
             width=260,
+            fg_color=THEME["primary"],
+            hover_color=THEME["primary_hover"],
+            text_color="#FFFFFF",
             command=self.handle_init,
         )
-        self.btn_init.pack(pady=10)
+        self.btn_init.pack(pady=8)
 
         btn_cloud_restore = ctk.CTkButton(
             self.content_container,
-            text="☁️ Restore from Google Drive",
+            text="Restore from Google Drive",
             font=ctk.CTkFont(size=12),
-            fg_color="#27ae60",
-            hover_color="#2ecc71",
+            fg_color=THEME["cloud"],
+            hover_color=THEME["cloud_hover"],
+            text_color="#FFFFFF",
             height=34,
             width=260,
             command=self.handle_gdrive_sync,
         )
-        btn_cloud_restore.pack(pady=4)
+        btn_cloud_restore.pack(pady=3)
 
     def handle_init(self):
         pwd = self.init_pwd.get()
@@ -245,7 +315,7 @@ class CryptonApp(ctk.CTk):
             return
 
         self.btn_init.configure(state="disabled")
-        self.lbl_init_status.configure(text="Deriving Argon2id keys...", text_color="yellow")
+        self.lbl_init_status.configure(text="Deriving Argon2id keys...", text_color=THEME["text_muted"])
 
         def worker():
             try:
@@ -257,7 +327,7 @@ class CryptonApp(ctk.CTk):
             except Exception as e:
                 self.after(0, lambda err=e: (
                     self.btn_init.configure(state="normal"),
-                    self.lbl_init_status.configure(text=f"Error: {err}", text_color="red"),
+                    self.lbl_init_status.configure(text=f"Error: {err}", text_color=THEME["danger"]),
                     messagebox.showerror("Initialization Failed", str(err)),
                 ))
 
@@ -265,57 +335,71 @@ class CryptonApp(ctk.CTk):
 
     # ================= VIEW 2: VAULT LOCKED =================
     def render_locked_view(self):
+        logo = get_vault_logo_image((58, 58))
+        if logo:
+            logo_lbl = ctk.CTkLabel(self.content_container, image=logo, text="")
+            logo_lbl.pack(pady=(22, 6))
+
         title = ctk.CTkLabel(
             self.content_container,
-            text="🔒 Crypton Vault Locked",
+            text="Crypton Vault Locked",
             font=ctk.CTkFont(size=22, weight="bold"),
+            text_color=THEME["text_dark"],
         )
-        title.pack(pady=(40, 10))
+        title.pack(pady=(0 if logo else 30, 4))
 
         sub = ctk.CTkLabel(
             self.content_container,
-            text="Enter master password to mount your encrypted files.",
+            text="Enter master password to access encrypted files.",
             font=ctk.CTkFont(size=13),
-            text_color="gray70",
+            text_color=THEME["text_muted"],
         )
-        sub.pack(pady=(0, 20))
+        sub.pack(pady=(0, 16))
 
         self.entry_unlock_pwd = ctk.CTkEntry(
             self.content_container,
             placeholder_text="Enter Master Password",
             show="*",
             width=320,
-            height=42,
+            height=40,
+            fg_color=THEME["entry_bg"],
+            border_color=THEME["entry_border"],
+            text_color=THEME["text_dark"],
+            placeholder_text_color=THEME["entry_placeholder"],
         )
-        self.entry_unlock_pwd.pack(pady=10)
+        self.entry_unlock_pwd.pack(pady=8)
         self.entry_unlock_pwd.bind("<Return>", lambda e: self.handle_unlock())
 
         self.lbl_unlock_status = ctk.CTkLabel(
             self.content_container, text="", font=ctk.CTkFont(size=12)
         )
-        self.lbl_unlock_status.pack(pady=5)
+        self.lbl_unlock_status.pack(pady=4)
 
         self.btn_unlock = ctk.CTkButton(
             self.content_container,
-            text="🔓 Unlock & Open Drive",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            height=44,
+            text="Unlock & Open Drive",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            height=42,
             width=260,
+            fg_color=THEME["primary"],
+            hover_color=THEME["primary_hover"],
+            text_color="#FFFFFF",
             command=self.handle_unlock,
         )
-        self.btn_unlock.pack(pady=10)
+        self.btn_unlock.pack(pady=8)
 
         btn_cloud = ctk.CTkButton(
             self.content_container,
-            text="☁️ Cloud Backup & Restore",
+            text="Cloud Backup & Restore",
             font=ctk.CTkFont(size=12),
-            fg_color="#2c3e50",
-            hover_color="#34495e",
+            fg_color=THEME["cloud"],
+            hover_color=THEME["cloud_hover"],
+            text_color="#FFFFFF",
             height=34,
             width=260,
             command=self.handle_gdrive_sync,
         )
-        btn_cloud.pack(pady=4)
+        btn_cloud.pack(pady=3)
 
     def handle_unlock(self):
         pwd = self.entry_unlock_pwd.get()
@@ -324,7 +408,7 @@ class CryptonApp(ctk.CTk):
 
         self.btn_unlock.configure(state="disabled")
         self.lbl_unlock_status.configure(
-            text="Unlocking & auto-repairing vault...", text_color="yellow"
+            text="Unlocking & verifying vault...", text_color=THEME["text_muted"]
         )
 
         def worker():
@@ -335,7 +419,7 @@ class CryptonApp(ctk.CTk):
                 # 2. Automatic Self-Healing: clean any broken records silently
                 VaultManager.verify_and_repair_vault(self.drive_path, mvk)
 
-                # 3. Mount transparent FUSE filesystem
+                # 3. Mount transparent filesystem
                 mountpoint, _ = VaultMountService.mount(self.drive_path, mvk)
 
                 self.after(0, lambda: self.on_unlock_success(mvk, mountpoint))
@@ -350,88 +434,90 @@ class CryptonApp(ctk.CTk):
         self.mvk = mvk
         self.mountpoint = mountpoint
         self.refresh_state()
-        self.open_file_manager()
+        # Note: Do not auto-open file manager on unlock per user preference
 
     def on_unlock_bad_password(self):
         self.btn_unlock.configure(state="normal")
-        self.lbl_unlock_status.configure(text="Incorrect password. Access denied.", text_color="red")
+        self.lbl_unlock_status.configure(text="Incorrect password. Access denied.", text_color=THEME["danger"])
         messagebox.showerror("Access Denied", "Incorrect master password.")
 
     def on_unlock_error(self, err_msg):
         self.btn_unlock.configure(state="normal")
-        self.lbl_unlock_status.configure(text=f"Error: {err_msg}", text_color="red")
+        self.lbl_unlock_status.configure(text=f"Error: {err_msg}", text_color=THEME["danger"])
         messagebox.showerror("Unlock Failed", err_msg)
 
     # ================= VIEW 3: VAULT UNLOCKED =================
     def render_unlocked_view(self):
-        icon = ctk.CTkLabel(
-            self.content_container,
-            text="●",
-            font=ctk.CTkFont(size=40),
-            text_color="#2ecc71",
-        )
-        icon.pack(pady=(25, 5))
+        logo = get_vault_logo_image((52, 52))
+        if logo:
+            logo_lbl = ctk.CTkLabel(self.content_container, image=logo, text="")
+            logo_lbl.pack(pady=(16, 4))
 
         title = ctk.CTkLabel(
             self.content_container,
-            text="Vault Unlocked & Active",
+            text="● Vault Unlocked & Active",
             font=ctk.CTkFont(size=20, weight="bold"),
-            text_color="#2ecc71",
+            text_color=THEME["status_green"],
         )
-        title.pack(pady=(0, 6))
+        title.pack(pady=(0 if logo else 20, 4))
 
         path_lbl = ctk.CTkLabel(
             self.content_container,
             text=f"Mounted: {self.mountpoint}",
             font=ctk.CTkFont(size=12),
-            text_color="gray70",
+            text_color=THEME["text_muted"],
         )
-        path_lbl.pack(pady=(0, 15))
+        path_lbl.pack(pady=(0, 10))
 
         tip = ctk.CTkLabel(
             self.content_container,
-            text="✨ Use your normal file manager to drag & drop, view, or edit files.\nEverything is encrypted transparently on the fly.",
+            text="Use your file manager to drag & drop, view, or edit files.\nEverything is encrypted transparently on the fly.",
             font=ctk.CTkFont(size=12),
-            text_color="gray80",
+            text_color=THEME["text_muted"],
             justify="center",
         )
-        tip.pack(pady=(0, 25))
+        tip.pack(pady=(0, 18))
 
         # Main Actions (Minimalist: Open Folder + Lock Drive)
         btn_open = ctk.CTkButton(
             self.content_container,
-            text="📂 Open in File Manager",
+            text="Open in File Manager",
             font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=THEME["primary"],
+            hover_color=THEME["primary_hover"],
+            text_color="#FFFFFF",
             height=42,
             width=260,
             command=self.open_file_manager,
         )
-        btn_open.pack(pady=6)
+        btn_open.pack(pady=5)
 
         btn_lock = ctk.CTkButton(
             self.content_container,
-            text="🔒 Lock & Safely Close",
+            text="Lock & Safely Close",
             font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#e74c3c",
-            hover_color="#c0392b",
+            fg_color=THEME["danger"],
+            hover_color=THEME["danger_hover"],
+            text_color="#FFFFFF",
             height=42,
             width=260,
             command=self.handle_lock,
         )
-        btn_lock.pack(pady=6)
+        btn_lock.pack(pady=5)
 
         # Subtle Optional Cloud Sync
         btn_gdrive = ctk.CTkButton(
             self.content_container,
-            text="☁️ Sync with Google Drive (Optional)",
+            text="Sync with Google Drive (Optional)",
             font=ctk.CTkFont(size=12),
-            fg_color="#2c3e50",
-            hover_color="#34495e",
+            fg_color=THEME["cloud"],
+            hover_color=THEME["cloud_hover"],
+            text_color="#FFFFFF",
             height=34,
             width=260,
             command=self.handle_gdrive_sync,
         )
-        btn_gdrive.pack(pady=(12, 10))
+        btn_gdrive.pack(pady=(8, 6))
 
     def open_file_manager(self):
         if self.mountpoint and os.path.exists(self.mountpoint):
@@ -479,6 +565,7 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
         self.title("Developer & Performance Settings")
         self.geometry("490x420")
         self.resizable(False, False)
+        self.configure(fg_color=THEME["bg"])
         self.transient(master)
         self.grab_set()
         apply_dark_title_bar(self)
@@ -491,8 +578,9 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
         # Header
         title = ctk.CTkLabel(
             self,
-            text="⚡ RAM Staging & Performance",
+            text="RAM Staging & Performance",
             font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=THEME["text_dark"],
         )
         title.pack(pady=(20, 5))
 
@@ -504,13 +592,19 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
                 "Files larger than your limit will safely stage directly on disk."
             ),
             font=ctk.CTkFont(size=11),
-            text_color="gray70",
+            text_color=THEME["text_muted"],
             justify="center",
         )
         desc.pack(padx=20, pady=(0, 15))
 
         # System RAM info frame
-        info_frame = ctk.CTkFrame(self, corner_radius=8)
+        info_frame = ctk.CTkFrame(
+            self,
+            corner_radius=8,
+            fg_color=THEME["card_bg"],
+            border_width=1,
+            border_color=THEME["card_border"],
+        )
         info_frame.pack(fill="x", padx=25, pady=5)
 
         shm_main = "PC Fast RAM Cache: Not available"
@@ -537,25 +631,25 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
                 ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
                 free_mb = stat.ullAvailPhys / (1024 * 1024)
                 total_mb = stat.ullTotalPhys / (1024 * 1024)
-                shm_main = f"🖥️ System RAM: {free_mb:,.0f} MB available"
+                shm_main = f"System RAM: {free_mb:,.0f} MB available"
                 shm_sub = f"Allocated from your PC's ~{round(total_mb/1024)} GB memory (NOT pendrive space)"
             except Exception:
-                shm_main = "🖥️ System RAM: Available"
+                shm_main = "System RAM: Available"
         elif os.path.isdir("/dev/shm"):
             try:
                 st = os.statvfs("/dev/shm")
                 free_mb = (st.f_bavail * st.f_frsize) / (1024 * 1024)
                 total_mb = (st.f_blocks * st.f_frsize) / (1024 * 1024)
-                shm_main = f"🖥️ PC Fast RAM Cache (/dev/shm): {free_mb:,.0f} MB free"
+                shm_main = f"PC Fast RAM Cache (/dev/shm): {free_mb:,.0f} MB free"
                 shm_sub = f"Allocated from your PC's ~{round(total_mb*2/1024)} GB memory (NOT pendrive space)"
             except Exception:
-                shm_main = "🖥️ PC Fast RAM Cache: Available"
+                shm_main = "PC Fast RAM Cache: Available"
 
         lbl_shm = ctk.CTkLabel(
             info_frame,
             text=shm_main,
             font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="#3498db",
+            text_color=THEME["text_dark"],
         )
         lbl_shm.pack(padx=15, pady=(8, 2 if shm_sub else 8))
 
@@ -564,12 +658,18 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
                 info_frame,
                 text=shm_sub,
                 font=ctk.CTkFont(size=10),
-                text_color="gray70",
+                text_color=THEME["text_muted"],
             )
             lbl_sub.pack(padx=15, pady=(0, 8))
 
         # Setting options frame
-        setting_frame = ctk.CTkFrame(self, corner_radius=8)
+        setting_frame = ctk.CTkFrame(
+            self,
+            corner_radius=8,
+            fg_color=THEME["card_bg"],
+            border_width=1,
+            border_color=THEME["card_border"],
+        )
         setting_frame.pack(fill="x", padx=25, pady=12)
 
         # Active Setting Badge
@@ -580,6 +680,7 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
             cur_row,
             text="Currently Active Limit:",
             font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=THEME["text_dark"],
         )
         lbl_cur_title.pack(side="left")
 
@@ -587,7 +688,7 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
             cur_row,
             text=f"{current_limit} MB",
             font=ctk.CTkFont(size=13, weight="bold"),
-            text_color="#2ecc71",
+            text_color=THEME["status_green"],
         )
         self.lbl_active_val.pack(side="left", padx=8)
 
@@ -596,7 +697,7 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
             setting_frame,
             text="Change Limit to:",
             font=ctk.CTkFont(size=12),
-            text_color="gray80",
+            text_color=THEME["text_muted"],
         )
         lbl_limit.pack(anchor="w", padx=15, pady=(4, 4))
 
@@ -622,6 +723,12 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
             values=self.options,
             width=240,
             height=34,
+            fg_color=THEME["card_bg"],
+            button_color=THEME["secondary"],
+            button_hover_color=THEME["secondary_hover"],
+            text_color=THEME["text_dark"],
+            dropdown_fg_color=THEME["card_bg"],
+            dropdown_text_color=THEME["text_dark"],
         )
         self.combo_limit.set(default_val)
         self.combo_limit.pack(padx=15, pady=(0, 15), anchor="w")
@@ -640,10 +747,13 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
 
         btn_save = ctk.CTkButton(
             btn_frame,
-            text="💾 Save & Apply",
+            text="Save & Apply",
             font=ctk.CTkFont(size=13, weight="bold"),
             width=140,
             height=36,
+            fg_color=THEME["primary"],
+            hover_color=THEME["primary_hover"],
+            text_color="#FFFFFF",
             command=self.save_settings,
         )
         btn_save.pack(side="left", padx=(0, 10))
@@ -651,8 +761,9 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
         btn_close = ctk.CTkButton(
             btn_frame,
             text="Close",
-            fg_color="#7f8c8d",
-            hover_color="#95a5a6",
+            fg_color=THEME["secondary"],
+            hover_color=THEME["secondary_hover"],
+            text_color="#FFFFFF",
             width=100,
             height=36,
             command=self.destroy,
@@ -667,8 +778,8 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
         VaultMountService.update_ram_limit(limit_mb)
         self.lbl_active_val.configure(text=f"{limit_mb} MB")
         self.lbl_status.configure(
-            text=f"✔ Saved! Limit updated to {limit_mb} MB.",
-            text_color="#2ecc71",
+            text=f"Saved! Limit updated to {limit_mb} MB.",
+            text_color=THEME["status_green"],
         )
 
 
@@ -678,8 +789,9 @@ class GDriveSyncDialog(ctk.CTkToplevel):
     def __init__(self, master, drive_path: str, auth: GDriveAuth):
         super().__init__(master)
         self.title("Google Drive Cloud Backup & Sync")
-        self.geometry("560x520")
+        self.geometry("560x530")
         self.resizable(False, False)
+        self.configure(fg_color=THEME["bg"])
         self.transient(master)
         self.grab_set()
         apply_dark_title_bar(self)
@@ -694,8 +806,9 @@ class GDriveSyncDialog(ctk.CTkToplevel):
         # Header
         title = ctk.CTkLabel(
             self,
-            text="☁️ End-to-End Encrypted Cloud Sync",
+            text="End-to-End Encrypted Cloud Sync",
             font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=THEME["text_dark"],
         )
         title.pack(pady=(14, 2))
 
@@ -706,13 +819,19 @@ class GDriveSyncDialog(ctk.CTkToplevel):
                 "• Zero-Footprint: OAuth tokens remain strictly in RAM and are wiped on exit."
             ),
             font=ctk.CTkFont(size=11),
-            text_color="gray75",
+            text_color=THEME["text_muted"],
             justify="center",
         )
         desc.pack(padx=20, pady=(0, 8))
 
         # Credentials / OAuth Config Card
-        self.creds_frame = ctk.CTkFrame(self, corner_radius=8)
+        self.creds_frame = ctk.CTkFrame(
+            self,
+            corner_radius=8,
+            fg_color=THEME["card_bg"],
+            border_width=1,
+            border_color=THEME["card_border"],
+        )
         self.creds_frame.pack(fill="x", padx=20, pady=(0, 8))
 
         self.lbl_creds = ctk.CTkLabel(
@@ -724,16 +843,25 @@ class GDriveSyncDialog(ctk.CTkToplevel):
 
         self.btn_load_creds = ctk.CTkButton(
             self.creds_frame,
-            text="📂 Load client_secrets.json",
+            text="Load client_secrets.json",
             width=160,
-            height=26,
+            height=28,
             font=ctk.CTkFont(size=11),
+            fg_color=THEME["secondary"],
+            hover_color=THEME["secondary_hover"],
+            text_color="#FFFFFF",
             command=self.load_credentials_file,
         )
         self.btn_load_creds.pack(side="right", padx=10, pady=6)
 
         # Storage Status Card
-        status_card = ctk.CTkFrame(self, corner_radius=8)
+        status_card = ctk.CTkFrame(
+            self,
+            corner_radius=8,
+            fg_color=THEME["card_bg"],
+            border_width=1,
+            border_color=THEME["card_border"],
+        )
         status_card.pack(fill="x", padx=20, pady=(0, 8))
 
         row1 = ctk.CTkFrame(status_card, fg_color="transparent")
@@ -741,15 +869,17 @@ class GDriveSyncDialog(ctk.CTkToplevel):
 
         self.lbl_local_info = ctk.CTkLabel(
             row1,
-            text="💾 USB Pendrive: Scanning...",
+            text="USB Pendrive: Scanning...",
             font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=THEME["text_dark"],
         )
         self.lbl_local_info.pack(side="left")
 
         self.lbl_cloud_info = ctk.CTkLabel(
             row1,
-            text="☁️ Google Drive: Checking...",
+            text="Google Drive: Checking...",
             font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=THEME["text_dark"],
         )
         self.lbl_cloud_info.pack(side="right")
 
@@ -760,31 +890,38 @@ class GDriveSyncDialog(ctk.CTkToplevel):
             row2,
             text="Pending: 0 to upload | 0 to download",
             font=ctk.CTkFont(size=11),
-            text_color="gray75",
+            text_color=THEME["text_muted"],
         )
         self.lbl_delta_info.pack(side="left")
 
         self.btn_refresh = ctk.CTkButton(
             row2,
-            text="🔄 Scan",
+            text="Scan",
             width=65,
-            height=22,
+            height=24,
             font=ctk.CTkFont(size=10),
-            fg_color="#34495e",
-            hover_color="#415b76",
+            fg_color=THEME["secondary"],
+            hover_color=THEME["secondary_hover"],
+            text_color="#FFFFFF",
             command=self.refresh_cloud_status,
         )
         self.btn_refresh.pack(side="right")
 
         # Progress / Activity Frame
-        activity_frame = ctk.CTkFrame(self, corner_radius=8)
+        activity_frame = ctk.CTkFrame(
+            self,
+            corner_radius=8,
+            fg_color=THEME["card_bg"],
+            border_width=1,
+            border_color=THEME["card_border"],
+        )
         activity_frame.pack(fill="x", padx=20, pady=4)
 
         self.lbl_step = ctk.CTkLabel(
             activity_frame,
             text="Ready to synchronize with Google Drive.",
             font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="#3498db",
+            text_color=THEME["primary"],
             wraplength=500,
         )
         self.lbl_step.pack(padx=15, pady=(8, 4))
@@ -797,7 +934,7 @@ class GDriveSyncDialog(ctk.CTkToplevel):
             activity_frame,
             text="",
             font=ctk.CTkFont(size=11),
-            text_color="gray70",
+            text_color=THEME["text_muted"],
         )
         self.lbl_details.pack(padx=15, pady=(0, 6))
 
@@ -807,10 +944,11 @@ class GDriveSyncDialog(ctk.CTkToplevel):
 
         self.btn_sync_local = ctk.CTkButton(
             btn_action_frame,
-            text="💾 Sync with Local Data",
+            text="Sync with Local Data",
             font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color="#2980b9",
-            hover_color="#3498db",
+            fg_color=THEME["secondary"],
+            hover_color=THEME["secondary_hover"],
+            text_color="#FFFFFF",
             height=40,
             command=self.start_sync_with_local,
         )
@@ -818,10 +956,11 @@ class GDriveSyncDialog(ctk.CTkToplevel):
 
         self.btn_sync_cloud = ctk.CTkButton(
             btn_action_frame,
-            text="☁️ Sync with Cloud Data",
+            text="Sync with Cloud Data",
             font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color="#27ae60",
-            hover_color="#2ecc71",
+            fg_color=THEME["primary"],
+            hover_color=THEME["primary_hover"],
+            text_color="#FFFFFF",
             height=40,
             command=self.start_sync_with_cloud,
         )
@@ -835,7 +974,7 @@ class GDriveSyncDialog(ctk.CTkToplevel):
             hints_frame,
             text="USB is Master (Push to Cloud)",
             font=ctk.CTkFont(size=10),
-            text_color="gray70",
+            text_color=THEME["text_muted"],
         )
         lbl_hint_local.pack(side="left", padx=10)
 
@@ -843,7 +982,7 @@ class GDriveSyncDialog(ctk.CTkToplevel):
             hints_frame,
             text="Cloud is Master (Pull to USB)",
             font=ctk.CTkFont(size=10),
-            text_color="gray70",
+            text_color=THEME["text_muted"],
         )
         lbl_hint_cloud.pack(side="right", padx=10)
 
@@ -854,8 +993,9 @@ class GDriveSyncDialog(ctk.CTkToplevel):
         self.btn_close = ctk.CTkButton(
             footer_frame,
             text="Close",
-            fg_color="#7f8c8d",
-            hover_color="#95a5a6",
+            fg_color=THEME["secondary"],
+            hover_color=THEME["secondary_hover"],
+            text_color="#FFFFFF",
             width=100,
             height=32,
             command=self.destroy,
@@ -868,8 +1008,8 @@ class GDriveSyncDialog(ctk.CTkToplevel):
     def update_creds_display(self):
         if self.auth.has_valid_client_config():
             self.lbl_creds.configure(
-                text="✔ Google OAuth App Configured",
-                text_color="#2ecc71",
+                text="Google OAuth App Configured",
+                text_color=THEME["status_green"],
             )
             self.btn_load_creds.configure(text="Change JSON", width=100)
             if not self._is_busy:
@@ -877,10 +1017,10 @@ class GDriveSyncDialog(ctk.CTkToplevel):
                 self.btn_sync_cloud.configure(state="normal")
         else:
             self.lbl_creds.configure(
-                text="⚠️ client_secrets.json needed",
-                text_color="#f39c12",
+                text="client_secrets.json needed",
+                text_color="#D97706",
             )
-            self.btn_load_creds.configure(text="📂 Load client_secrets.json", width=170)
+            self.btn_load_creds.configure(text="Load client_secrets.json", width=170)
             self.btn_sync_local.configure(state="disabled")
             self.btn_sync_cloud.configure(state="disabled")
 
@@ -896,8 +1036,8 @@ class GDriveSyncDialog(ctk.CTkToplevel):
         if is_busy and active_btn:
             active_btn.configure(text=active_text)
         elif not is_busy:
-            self.btn_sync_local.configure(text="💾 Sync with Local Data")
-            self.btn_sync_cloud.configure(text="☁️ Sync with Cloud Data")
+            self.btn_sync_local.configure(text="Sync with Local Data")
+            self.btn_sync_cloud.configure(text="Sync with Cloud Data")
 
     def load_credentials_file(self):
         chosen = filedialog.askopenfilename(
