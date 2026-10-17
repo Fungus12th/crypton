@@ -20,25 +20,25 @@ else:
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
-# Modern Light Sage / Emerald Theme Palette
+# Bright Grass Green Theme Palette with Translucent Glassmorphism
 THEME = {
-    "bg": "#EDF5F0",             # Soft light sage / mint window background
-    "card_bg": "#FFFFFF",        # Crisp white container cards
-    "card_border": "#D2E4D8",    # Subtle pale sage border
-    "text_dark": "#163326",      # Deep forest charcoal for titles and bold text
-    "text_muted": "#406352",     # Sage slate for subtitles and hints
-    "entry_bg": "#FFFFFF",       # Entry background
-    "entry_border": "#9FC4AD",   # Entry border
-    "entry_placeholder": "#799A87",
-    "primary": "#10B981",        # Emerald Green (Unlock, Initialize, Save)
-    "primary_hover": "#059669",
-    "secondary": "#2D5A43",      # Forest slate (Dev, Change Drive, Refresh)
-    "secondary_hover": "#1E3E2E",
-    "danger": "#E05252",         # Warm coral / crimson (Lock & Close)
-    "danger_hover": "#C83E3E",
-    "cloud": "#16806E",          # Deep sea-green / teal (Sync)
-    "cloud_hover": "#116053",
-    "status_green": "#10B981",
+    "bg": "#B8EBB8",             # Bright, fresh, luminous grass green
+    "card_bg": "#D0F5D2",        # Light fresh grass container tint (no harsh white!)
+    "card_border": "#7BC883",    # Clean grass border
+    "text_dark": "#0B3314",      # Deep forest charcoal for high-contrast legible titles
+    "text_muted": "#1B5226",     # Rich meadow grass for readable subtitles & labels
+    "entry_bg": "#E2F9E4",       # Soft translucent light-mint grass input
+    "entry_border": "#56BE63",   # Vibrant green input border
+    "entry_placeholder": "#4C8E58",
+    "primary": "#198754",        # Vibrant grass emerald (Unlock, Initialize, Save)
+    "primary_hover": "#146c43",
+    "secondary": "#246835",      # Deep meadow green (Dev, Change Drive, Refresh)
+    "secondary_hover": "#1A4D27",
+    "danger": "#D9534F",         # Coral / crimson (Lock & Close)
+    "danger_hover": "#C9302C",
+    "cloud": "#147A65",          # Deep sea-green (Sync)
+    "cloud_hover": "#0E5848",
+    "status_green": "#198754",
 }
 
 
@@ -133,6 +133,10 @@ class CryptonApp(ctk.CTk):
         self.geometry("560x450")
         self.minsize(520, 420)
         self.configure(fg_color=THEME["bg"])
+        try:
+            self.attributes("-alpha", 0.94)
+        except Exception:
+            pass
         apply_dark_title_bar(self)
         set_window_icon(self)
 
@@ -566,6 +570,10 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
         self.geometry("490x420")
         self.resizable(False, False)
         self.configure(fg_color=THEME["bg"])
+        try:
+            self.attributes("-alpha", 0.95)
+        except Exception:
+            pass
         self.transient(master)
         self.grab_set()
         apply_dark_title_bar(self)
@@ -792,6 +800,10 @@ class GDriveSyncDialog(ctk.CTkToplevel):
         self.geometry("560x530")
         self.resizable(False, False)
         self.configure(fg_color=THEME["bg"])
+        try:
+            self.attributes("-alpha", 0.95)
+        except Exception:
+            pass
         self.transient(master)
         self.grab_set()
         apply_dark_title_bar(self)
