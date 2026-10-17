@@ -13,7 +13,6 @@
   <img src="https://img.shields.io/badge/Security-AES--256--GCM-success" alt="Cipher">
   <img src="https://img.shields.io/badge/KDF-Argon2id-orange" alt="KDF">
   <img src="https://img.shields.io/badge/Type-Portable%20App-blue" alt="App Type">
-  <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
 </p>
 
 ---
@@ -121,8 +120,4 @@ crypton change-password /media/user/MY_USB
 | **File Cipher** | **64 KB AEAD chunks** (AES-256-GCM with chunk index AAD) |
 | **File Integrity** | Per-file **SHA-256** hashes stored in encrypted manifest |
 
----
 
-## 📄 License
-
-This project is licensed under the MIT License — see the `LICENSE` file for details.
