@@ -36,6 +36,8 @@ for pkg in ('customtkinter', '_argon2_cffi_bindings', 'cryptography', 'google_au
     except Exception:
         pass
 
+datas += [('crypton/assets', 'crypton/assets'), ('crypton.ico', '.')]
+
 a = Analysis(
     ['crypton/main.py'],
     pathex=['.'],
@@ -70,4 +72,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='crypton.ico',
 )

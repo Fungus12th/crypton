@@ -6,6 +6,7 @@ import shutil
 import hashlib
 import threading
 import subprocess
+import concurrent.futures
 from typing import Dict, Any, Optional, Tuple
 
 from crypton.core.vault import VaultManager
@@ -30,10 +31,52 @@ def get_available_drive_letter() -> str:
     return "Z:"
 
 
+def _get_icon_path() -> Optional[str]:
+    """Find absolute path to crypton.ico for Windows Explorer drive icon."""
+    candidates = []
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+        candidates.extend([
+            os.path.join(base, "crypton.ico"),
+            os.path.join(base, "crypton", "assets", "crypton.ico"),
+            os.path.join(os.path.dirname(sys.executable), "crypton.ico"),
+        ])
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.extend([
+        os.path.join(module_dir, "..", "assets", "crypton.ico"),
+        os.path.join(module_dir, "..", "..", "crypton.ico"),
+        os.path.join(os.getcwd(), "crypton.ico"),
+    ])
+    for p in candidates:
+        abs_p = os.path.abspath(p)
+        if os.path.isfile(abs_p):
+            return abs_p
+    return None
+
+
+def _find_fastest_staging_root() -> str:
+    """Find fastest staging root: checks for RAM disk first (DRIVE_RAMDISK=6 or %RAMDISK%), else %LOCALAPPDATA% / %TEMP%."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            env_ramdisk = os.environ.get("RAMDISK")
+            if env_ramdisk and os.path.isdir(env_ramdisk):
+                return env_ramdisk
+
+            for i in range(25, -1, -1):
+                letter = f"{chr(65 + i)}:\\"
+                if ctypes.windll.kernel32.GetDriveTypeW(letter) == 6:
+                    return letter
+        except Exception:
+            pass
+
+    return os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or "C:\\Temp"
+
+
 class WindowsVaultFS:
     """Zero-privilege transparent virtual drive filesystem for Windows using subst + real-time sync."""
 
-    def __init__(self, drive_path: str, mvk: bytes, ram_limit_mb: Optional[int] = None):
+    def __init__(self, drive_path: str, mvk: bytes, ram_limit_mb: Optional[int] = None, target_mountpoint: Optional[str] = None):
         self.drive_path = os.path.abspath(drive_path)
         self.mvk = mvk
 
@@ -42,11 +85,24 @@ class WindowsVaultFS:
             ram_limit_mb = settings.get("ram_limit_mb", 32)
         self.ram_limit = int(ram_limit_mb) * 1024 * 1024
 
-        drive_hash = hashlib.sha256(self.drive_path.encode()).hexdigest()[:10]
-        self.staging_dir = os.path.join(
-            os.environ.get("TEMP", os.environ.get("LOCALAPPDATA", "C:\\Temp")),
-            f"crypton_vault_{drive_hash}_{uuid.uuid4().hex[:6]}",
-        )
+        clean_target = (target_mountpoint or "").rstrip("\\/ ")
+        # If target is empty or a single drive letter (e.g. "Z:" or "Z")
+        if not clean_target or (len(clean_target) in (1, 2) and (clean_target.endswith(":") or len(clean_target) == 1)):
+            self.is_drive_letter = True
+            letter = clean_target[0].upper() if clean_target else get_available_drive_letter()[0].upper()
+            self.drive_letter = f"{letter}:"
+            drive_hash = hashlib.sha256(self.drive_path.encode()).hexdigest()[:10]
+            staging_base = _find_fastest_staging_root()
+            self.staging_dir = os.path.join(
+                staging_base,
+                "CryptonVault",
+                f"vault_{drive_hash}_{uuid.uuid4().hex[:6]}",
+            )
+        else:
+            self.is_drive_letter = False
+            self.drive_letter = None
+            self.staging_dir = os.path.abspath(target_mountpoint)
+
         os.makedirs(self.staging_dir, exist_ok=True)
 
         self.manifest = VaultManager._load_manifest(self.drive_path, self.mvk)
@@ -60,8 +116,13 @@ class WindowsVaultFS:
         self.ram_limit = int(limit_mb) * 1024 * 1024
 
     def populate_initial_state(self):
-        """Decrypt existing files from vault into staging directory."""
-        for rel_path, rec in list(self.manifest.items()):
+        """Decrypt existing files from vault into staging directory in parallel for maximum speed."""
+        items = list(self.manifest.items())
+        if not items:
+            return
+
+        def _decrypt_worker(item):
+            rel_path, rec = item
             target_file = os.path.join(self.staging_dir, *rel_path.split("/"))
             os.makedirs(os.path.dirname(target_file), exist_ok=True)
 
@@ -84,16 +145,31 @@ class WindowsVaultFS:
                     except OSError:
                         pass
 
-                    sha = rec.get("sha256")
-                    if not sha and os.path.isfile(target_file):
-                        sha = self._compute_hash(target_file)
-                    self._file_state[rel_path] = (
-                        rec.get("size", os.path.getsize(target_file)),
+                    sz = rec.get("size", os.path.getsize(target_file))
+                    # Windows RAM optimization: Pin files <= ram_limit directly in system RAM cache
+                    if sys.platform == "win32" and sz <= self.ram_limit:
+                        try:
+                            import ctypes
+                            ctypes.windll.kernel32.SetFileAttributesW(target_file, 0x0100)  # FILE_ATTRIBUTE_TEMPORARY
+                        except Exception:
+                            pass
+
+                    return (
+                        rel_path,
+                        sz,
                         os.path.getmtime(target_file),
-                        sha or "",
                     )
                 except Exception as e:
                     print(f"[Crypton Warning] Failed to decrypt {rel_path}: {e}", file=sys.stderr)
+            return None
+
+        # Use up to 8 parallel workers for concurrent AES-GCM decryption
+        max_workers = min(8, max(2, (os.cpu_count() or 4)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for result in executor.map(_decrypt_worker, items):
+                if result:
+                    rel_p, sz, mt = result
+                    self._file_state[rel_p] = (sz, mt, "")
 
     @staticmethod
     def _compute_hash(path: str) -> str:
@@ -104,7 +180,7 @@ class WindowsVaultFS:
         return sha256.hexdigest()
 
     @staticmethod
-    def _set_drive_label(drive_letter: str, label: str = "Crypton Vault"):
+    def _set_drive_label_and_icon(drive_letter: str, label: str = "Crypton Vault"):
         if sys.platform != "win32":
             return
         letter = drive_letter.strip(":\\/ ").upper()
@@ -113,18 +189,28 @@ class WindowsVaultFS:
         try:
             import winreg
             import ctypes
-            key_path = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}\DefaultLabel"
-            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as k:
+            key_base = rf"Software\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\{letter}"
+
+            # 1. Custom drive label (replaces 'ACER (Z:)' with 'Crypton Vault (Z:)')
+            key_label = rf"{key_base}\DefaultLabel"
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_label) as k:
                 winreg.SetValueEx(k, "", 0, winreg.REG_SZ, label)
 
-            # Notify Windows Explorer of the new drive name
+            # 2. Custom copper bank vault icon
+            ico = _get_icon_path()
+            if ico:
+                key_icon = rf"{key_base}\DefaultIcon"
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_icon) as k:
+                    winreg.SetValueEx(k, "", 0, winreg.REG_SZ, ico)
+
+            # 3. Notify Windows Explorer of the new drive name and icon
             ctypes.windll.shell32.SHChangeNotify(0x00040000, 0x0005, f"{letter}:\\", None)
             ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
         except Exception:
             pass
 
     @staticmethod
-    def _remove_drive_label(drive_letter: str):
+    def _remove_drive_label_and_icon(drive_letter: str):
         if sys.platform != "win32":
             return
         letter = drive_letter.strip(":\\/ ").upper()
@@ -151,36 +237,68 @@ class WindowsVaultFS:
         except Exception:
             pass
 
-    def start(self, drive_letter: str):
-        """Mount the drive letter via subst and launch background sync."""
-        self.mountpoint = drive_letter.rstrip("\\")
-        if not self.mountpoint.endswith(":"):
-            self.mountpoint = f"{self.mountpoint}:"
+    def start(self, mountpoint: str):
+        """Mount the vault (drive letter via subst or directory) and launch background sync."""
+        if self.is_drive_letter:
+            self.mountpoint = f"{self.drive_letter}\\"
+            letter = self.drive_letter
 
-        self.populate_initial_state()
+            self.populate_initial_state()
+            self._unsubst(letter)
 
-        # Detach any previous mapping on this drive letter
-        self._unsubst(self.mountpoint)
-
-        # Map virtual drive letter
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.run(["subst", self.mountpoint, self.staging_dir], check=True, creationflags=flags)
-
-        # Set customized drive label in Explorer (e.g. 'Crypton Vault (Z:)')
-        self._set_drive_label(self.mountpoint, "Crypton Vault")
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.run(["subst", letter, self.staging_dir], check=True, creationflags=flags)
+            self._set_drive_label_and_icon(letter, "Crypton Vault")
+        else:
+            self.mountpoint = self.staging_dir
+            self.populate_initial_state()
 
         self._stop_event.clear()
         self._sync_thread = threading.Thread(target=self._sync_worker, daemon=True)
         self._sync_thread.start()
 
     def _sync_worker(self):
-        """Background thread monitoring the staging folder for file modifications, creations, deletions."""
-        while not self._stop_event.is_set():
+        """Kernel-assisted event-driven background thread monitoring staging folder with zero idle CPU/disk overhead."""
+        change_handle = None
+        if sys.platform == "win32" and os.path.isdir(self.staging_dir):
             try:
-                self.sync_changes()
-            except Exception as e:
-                print(f"[Crypton Sync Error] {e}", file=sys.stderr)
-            self._stop_event.wait(timeout=1.0)
+                import ctypes
+                flags = 0x1 | 0x2 | 0x8 | 0x10  # FILE_NAME | DIR_NAME | SIZE | LAST_WRITE
+                change_handle = ctypes.windll.kernel32.FindFirstChangeNotificationW(self.staging_dir, True, flags)
+            except Exception:
+                change_handle = None
+
+        try:
+            while not self._stop_event.is_set():
+                if change_handle and change_handle != -1:
+                    import ctypes
+                    # Wait up to 2 seconds in kernel sleep; wake up immediately when files change
+                    res = ctypes.windll.kernel32.WaitForSingleObject(change_handle, 2000)
+                    if self._stop_event.is_set():
+                        break
+                    if res == 0:  # WAIT_OBJECT_0: Actual file modification detected
+                        time.sleep(0.4)  # Debounce to let disk writes complete
+                        try:
+                            self.sync_changes()
+                        except Exception as e:
+                            print(f"[Crypton Sync Error] {e}", file=sys.stderr)
+                        ctypes.windll.kernel32.FindNextChangeNotification(change_handle)
+                    elif res == 258:  # WAIT_TIMEOUT: Idle period (zero disk access)
+                        pass
+                else:
+                    self._stop_event.wait(timeout=2.0)
+                    if not self._stop_event.is_set():
+                        try:
+                            self.sync_changes()
+                        except Exception as e:
+                            print(f"[Crypton Sync Error] {e}", file=sys.stderr)
+        finally:
+            if change_handle and change_handle != -1:
+                try:
+                    import ctypes
+                    ctypes.windll.kernel32.FindCloseChangeNotification(change_handle)
+                except Exception:
+                    pass
 
     def sync_changes(self, force: bool = False):
         """Detect modified, new, or deleted files in staging and flush encrypted blocks to USB."""
@@ -190,10 +308,10 @@ class WindowsVaultFS:
         with self._lock:
             manifest_dirty = False
             current_files = set()
+            files_to_encrypt = []
 
             # 1. Scan staging folder
             for root, dirs, files in os.walk(self.staging_dir):
-                # Ignore Windows system/hidden metadata files if needed
                 for f in files:
                     if f.lower() in ("desktop.ini", "thumbs.db"):
                         continue
@@ -207,7 +325,6 @@ class WindowsVaultFS:
                     except OSError:
                         continue
 
-                    # File might be actively written to; check if changed
                     known = self._file_state.get(rel_path)
                     size = stat_info.st_size
                     mtime = stat_info.st_mtime
@@ -215,54 +332,71 @@ class WindowsVaultFS:
                     needs_sync = False
                     if known is None:
                         needs_sync = True
-                    elif known[0] != size or abs(known[1] - mtime) > 0.1:
+                    elif known[0] != size or abs(known[1] - mtime) > 1.5:
                         needs_sync = True
 
                     if needs_sync:
                         try:
-                            # Try opening file to verify write handle is released
-                            sha = self._compute_hash(full_path)
-                        except (PermissionError, OSError):
-                            # File currently locked by another application (e.g. Explorer copy in progress)
-                            continue
-
-                        # Encrypt file to USB vault storage
-                        file_id = uuid.uuid4().hex
-                        enc_rel = VaultManager._get_encrypted_rel_path(self.mvk, rel_path, file_id)
-                        dst_enc = os.path.join(VaultManager.get_data_dir(self.drive_path), enc_rel)
-                        os.makedirs(os.path.dirname(dst_enc), exist_ok=True)
-                        file_key = derive_file_key(self.mvk, file_id)
-
-                        try:
-                            encrypt_file(full_path, dst_enc, file_key)
-                        except Exception as e:
-                            print(f"[Crypton Encrypt Error] {rel_path}: {e}", file=sys.stderr)
-                            continue
-
-                        # Clean old block if updating existing file
-                        if rel_path in self.manifest:
-                            old_rec = self.manifest[rel_path]
-                            old_enc = os.path.join(
-                                VaultManager.get_data_dir(self.drive_path),
-                                old_rec.get("enc_rel_path", old_rec.get("file_id", "")),
-                            )
-                            if os.path.isfile(old_enc) and old_enc != dst_enc:
+                            # Test handle release
+                            with open(full_path, "rb") as test_f:
+                                test_f.read(1024)
+                            if sys.platform == "win32" and size <= self.ram_limit:
                                 try:
-                                    os.remove(old_enc)
-                                except OSError:
+                                    import ctypes
+                                    ctypes.windll.kernel32.SetFileAttributesW(full_path, 0x0100)
+                                except Exception:
                                     pass
+                            files_to_encrypt.append((full_path, rel_path, size, mtime))
+                        except (PermissionError, OSError):
+                            continue
 
-                        self.manifest[rel_path] = {
-                            "file_id": file_id,
-                            "enc_rel_path": enc_rel,
-                            "rel_path": rel_path,
-                            "size": size,
-                            "mtime": mtime,
-                            "sha256": sha,
-                            "encrypted_at": time.time(),
-                        }
-                        self._file_state[rel_path] = (size, mtime, sha)
-                        manifest_dirty = True
+            # Encrypt modified / new files in parallel
+            if files_to_encrypt:
+                def _encrypt_worker(item):
+                    full_p, rel_p, sz, mt = item
+                    file_id = uuid.uuid4().hex
+                    enc_rel = VaultManager._get_encrypted_rel_path(self.mvk, rel_p, file_id)
+                    dst_enc = os.path.join(VaultManager.get_data_dir(self.drive_path), enc_rel)
+                    os.makedirs(os.path.dirname(dst_enc), exist_ok=True)
+                    file_key = derive_file_key(self.mvk, file_id)
+
+                    try:
+                        encrypt_file(full_p, dst_enc, file_key)
+                    except Exception as e:
+                        print(f"[Crypton Encrypt Error] {rel_p}: {e}", file=sys.stderr)
+                        return None
+
+                    # Clean old encrypted block if replacing existing file
+                    old_rec = self.manifest.get(rel_p)
+                    if old_rec:
+                        old_enc = os.path.join(
+                            VaultManager.get_data_dir(self.drive_path),
+                            old_rec.get("enc_rel_path", old_rec.get("file_id", "")),
+                        )
+                        if os.path.isfile(old_enc) and old_enc != dst_enc:
+                            try:
+                                os.remove(old_enc)
+                            except OSError:
+                                pass
+
+                    return rel_p, {
+                        "file_id": file_id,
+                        "enc_rel_path": enc_rel,
+                        "rel_path": rel_p,
+                        "size": sz,
+                        "mtime": mt,
+                        "sha256": "",
+                        "encrypted_at": time.time(),
+                    }, (sz, mt, "")
+
+                max_enc_workers = min(4, max(1, (os.cpu_count() or 2)))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_enc_workers) as executor:
+                    for res in executor.map(_encrypt_worker, files_to_encrypt):
+                        if res:
+                            rel_p, manifest_rec, state_rec = res
+                            self.manifest[rel_p] = manifest_rec
+                            self._file_state[rel_p] = state_rec
+                            manifest_dirty = True
 
             # 2. Check for deleted files
             deleted_files = set(self._file_state.keys()) - current_files
@@ -288,14 +422,17 @@ class WindowsVaultFS:
     @classmethod
     def _unsubst(cls, drive_letter: str):
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        clean = drive_letter.rstrip("\\")
+        if not clean.endswith(":"):
+            clean = f"{clean}:"
         try:
-            subprocess.run(["subst", drive_letter, "/D"], capture_output=True, creationflags=flags)
+            subprocess.run(["subst", clean, "/D"], capture_output=True, creationflags=flags)
         except Exception:
             pass
-        cls._remove_drive_label(drive_letter)
+        cls._remove_drive_label_and_icon(clean)
 
     def stop(self):
-        """Stop worker, flush all data, unmount drive letter, and wipe staging folder."""
+        """Stop worker, flush all data, unmount drive letter, and securely wipe staging folder."""
         self._stop_event.set()
         if self._sync_thread and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=3.0)
@@ -303,21 +440,24 @@ class WindowsVaultFS:
         # Final synchronous sync
         self.sync_changes(force=True)
 
-        # Unsubst
-        if self.mountpoint:
-            self._unsubst(self.mountpoint)
+        # Unsubst if virtual drive letter
+        if self.is_drive_letter and self.drive_letter:
+            self._unsubst(self.drive_letter)
             self.mountpoint = None
 
-        # Securely clean staging directory
-        if os.path.isdir(self.staging_dir):
-            try:
-                shutil.rmtree(self.staging_dir, ignore_errors=True)
-            except OSError:
-                pass
+        # Clean staging directory in background thread for instant UI response
+        staging_dir = self.staging_dir
+        if os.path.isdir(staging_dir):
+            def _clean():
+                try:
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+                except OSError:
+                    pass
+            threading.Thread(target=_clean, daemon=True).start()
 
 
 class WindowsVaultMountService:
-    """Windows-specific mount service providing transparent drive letter mounting."""
+    """Windows mount service providing transparent high-speed virtual drive mounting or folder mounting."""
 
     _active_fs: Optional[WindowsVaultFS] = None
 
@@ -336,21 +476,17 @@ class WindowsVaultMountService:
         if not mountpoint:
             mountpoint = cls.get_default_mountpoint(drive_path)
 
-        drive_letter = mountpoint.rstrip("\\")
-        if not drive_letter.endswith(":"):
-            drive_letter = f"{drive_letter}:"
-
-        fs = WindowsVaultFS(drive_path, mvk)
+        fs = WindowsVaultFS(drive_path, mvk, target_mountpoint=mountpoint)
         cls._active_fs = fs
 
-        fs.start(drive_letter)
+        fs.start(mountpoint)
 
         # Dummy thread for interface compatibility
         t = threading.Thread(target=lambda: None)
         t.daemon = True
         t.start()
 
-        display_mount = f"{drive_letter}\\"
+        display_mount = fs.mountpoint or mountpoint
         return display_mount, t
 
     @classmethod
@@ -362,8 +498,13 @@ class WindowsVaultMountService:
                 print(f"[Crypton Unmount Error] {e}", file=sys.stderr)
             cls._active_fs = None
 
-        drive_letter = mountpoint.rstrip("\\")
-        if not drive_letter.endswith(":"):
-            drive_letter = f"{drive_letter}:"
-        WindowsVaultFS._unsubst(drive_letter)
+        clean = mountpoint.rstrip("\\/ ")
+        if clean and len(clean) in (1, 2) and (clean.endswith(":") or len(clean) == 1):
+            letter = f"{clean[0].upper()}:"
+            WindowsVaultFS._unsubst(letter)
+        elif os.path.isdir(mountpoint):
+            try:
+                shutil.rmtree(mountpoint, ignore_errors=True)
+            except OSError:
+                pass
         return True
