@@ -23,7 +23,7 @@ if %errorlevel% neq 0 (
 echo.
 echo [2/3] Installing dependencies...
 python -m pip install --upgrade pip
-python -m pip install -e . pyinstaller customtkinter argon2-cffi cryptography typer rich google-api-python-client google-auth-oauthlib google-auth-httplib2
+python -m pip install -e . pyinstaller customtkinter pillow argon2-cffi cryptography typer rich google-api-python-client google-auth-oauthlib google-auth-httplib2
 
 echo.
 echo [3/3] Compiling standalone Windows binary with PyInstaller...
