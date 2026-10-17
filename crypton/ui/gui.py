@@ -9,8 +9,13 @@ import customtkinter as ctk
 
 from crypton.core.vault import VaultManager, InvalidPasswordError, VaultError
 from crypton.core.header import VaultHeader
-from crypton.core.fuse_vault import VaultMountService, FUSE
 from crypton.sync.gdrive import GDriveSync, GDriveAuth, GDriveAuthError, GDriveSyncError
+
+if sys.platform == "win32":
+    from crypton.core.windows_mount import WindowsVaultMountService as VaultMountService
+    FUSE = None
+else:
+    from crypton.core.fuse_vault import VaultMountService, FUSE
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -356,7 +361,12 @@ class CryptonApp(ctk.CTk):
     def open_file_manager(self):
         if self.mountpoint and os.path.exists(self.mountpoint):
             try:
-                subprocess.Popen(["xdg-open", self.mountpoint])
+                if sys.platform == "win32":
+                    os.startfile(self.mountpoint)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", self.mountpoint])
+                else:
+                    subprocess.Popen(["xdg-open", self.mountpoint])
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to open file manager: {e}")
 
@@ -428,7 +438,33 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
 
         shm_main = "PC Fast RAM Cache: Not available"
         shm_sub = ""
-        if os.path.isdir("/dev/shm"):
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                class MEMORYSTATUSEX(ctypes.Structure):
+                    _fields_ = [
+                        ("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                    ]
+
+                stat = MEMORYSTATUSEX()
+                stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+                ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+                free_mb = stat.ullAvailPhys / (1024 * 1024)
+                total_mb = stat.ullTotalPhys / (1024 * 1024)
+                shm_main = f"🖥️ System RAM: {free_mb:,.0f} MB available"
+                shm_sub = f"Allocated from your PC's ~{round(total_mb/1024)} GB memory (NOT pendrive space)"
+            except Exception:
+                shm_main = "🖥️ System RAM: Available"
+        elif os.path.isdir("/dev/shm"):
             try:
                 st = os.statvfs("/dev/shm")
                 free_mb = (st.f_bavail * st.f_frsize) / (1024 * 1024)
