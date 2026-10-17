@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 import threading
 import subprocess
 import tkinter as tk
@@ -9,6 +10,7 @@ import customtkinter as ctk
 from crypton.core.vault import VaultManager, InvalidPasswordError, VaultError
 from crypton.core.header import VaultHeader
 from crypton.core.fuse_vault import VaultMountService, FUSE
+from crypton.sync.gdrive import GDriveSync, GDriveAuth, GDriveAuthError, GDriveSyncError
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -24,6 +26,7 @@ class CryptonApp(ctk.CTk):
         self.drive_path = os.path.abspath(initial_dir)
         self.mvk = None
         self.mountpoint = None
+        self.gdrive_auth = GDriveAuth()
 
         # Clean exit hook: ensure virtual filesystem is unmounted when closing
         self.protocol("WM_DELETE_WINDOW", self.on_window_close)
@@ -139,6 +142,18 @@ class CryptonApp(ctk.CTk):
         )
         self.btn_init.pack(pady=10)
 
+        btn_cloud_restore = ctk.CTkButton(
+            self.content_container,
+            text="☁️ Restore from Google Drive",
+            font=ctk.CTkFont(size=12),
+            fg_color="#27ae60",
+            hover_color="#2ecc71",
+            height=34,
+            width=260,
+            command=self.handle_gdrive_sync,
+        )
+        btn_cloud_restore.pack(pady=4)
+
     def handle_init(self):
         pwd = self.init_pwd.get()
         confirm = self.init_confirm.get()
@@ -212,6 +227,18 @@ class CryptonApp(ctk.CTk):
         )
         self.btn_unlock.pack(pady=10)
 
+        btn_cloud = ctk.CTkButton(
+            self.content_container,
+            text="☁️ Cloud Backup & Restore",
+            font=ctk.CTkFont(size=12),
+            fg_color="#2c3e50",
+            hover_color="#34495e",
+            height=34,
+            width=260,
+            command=self.handle_gdrive_sync,
+        )
+        btn_cloud.pack(pady=4)
+
     def handle_unlock(self):
         pwd = self.entry_unlock_pwd.get()
         if not pwd:
@@ -245,12 +272,6 @@ class CryptonApp(ctk.CTk):
         self.mvk = mvk
         self.mountpoint = mountpoint
         self.refresh_state()
-
-        # Automatically open the user's native file manager (Nautilus, Dolphin, Explorer)
-        try:
-            subprocess.Popen(["xdg-open", mountpoint])
-        except Exception:
-            pass
 
     def on_unlock_bad_password(self):
         self.btn_unlock.configure(state="normal")
@@ -344,16 +365,15 @@ class CryptonApp(ctk.CTk):
             VaultMountService.unmount(self.mountpoint)
             self.mountpoint = None
 
+        if hasattr(self, "gdrive_auth") and self.gdrive_auth:
+            self.gdrive_auth.wipe_credentials()
+
         self.mvk = None
         self.refresh_state()
         messagebox.showinfo("Vault Locked", "Your files have been safely encrypted and unmounted.")
 
     def handle_gdrive_sync(self):
-        messagebox.showinfo(
-            "Google Drive Sync",
-            "Google Drive Sync:\nOAuth login will prompt your Google account.\n"
-            "(Credentials are used in memory and never stored on the USB drive).",
-        )
+        GDriveSyncDialog(self, self.drive_path, self.gdrive_auth)
 
     def open_dev_settings(self):
         DeveloperSettingsDialog(self, self.drive_path)
@@ -361,6 +381,8 @@ class CryptonApp(ctk.CTk):
     def on_window_close(self):
         if self.mountpoint:
             VaultMountService.unmount(self.mountpoint)
+        if hasattr(self, "gdrive_auth") and self.gdrive_auth:
+            self.gdrive_auth.wipe_credentials()
         self.destroy()
 
 
@@ -535,6 +557,364 @@ class DeveloperSettingsDialog(ctk.CTkToplevel):
             text=f"✔ Saved! Limit updated to {limit_mb} MB.",
             text_color="#2ecc71",
         )
+
+
+class GDriveSyncDialog(ctk.CTkToplevel):
+    """Zero-Knowledge Google Drive Cloud Backup, Restore, and Two-Way Sync Modal."""
+
+    def __init__(self, master, drive_path: str, auth: GDriveAuth):
+        super().__init__(master)
+        self.title("Google Drive Cloud Backup & Sync")
+        self.geometry("560x520")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        self.master_app = master
+        self.drive_path = drive_path
+        self.auth = auth
+        self.sync_engine = GDriveSync(auth=auth)
+        self._is_busy = False
+
+        # Header
+        title = ctk.CTkLabel(
+            self,
+            text="☁️ End-to-End Encrypted Cloud Sync",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        )
+        title.pack(pady=(14, 2))
+
+        desc = ctk.CTkLabel(
+            self,
+            text=(
+                "• Zero-Knowledge: Google only sees AES-256-GCM ciphertext chunks.\n"
+                "• Zero-Footprint: OAuth tokens remain strictly in RAM and are wiped on exit."
+            ),
+            font=ctk.CTkFont(size=11),
+            text_color="gray75",
+            justify="center",
+        )
+        desc.pack(padx=20, pady=(0, 8))
+
+        # Credentials / OAuth Config Card
+        self.creds_frame = ctk.CTkFrame(self, corner_radius=8)
+        self.creds_frame.pack(fill="x", padx=20, pady=(0, 8))
+
+        self.lbl_creds = ctk.CTkLabel(
+            self.creds_frame,
+            text="",
+            font=ctk.CTkFont(size=11, weight="bold"),
+        )
+        self.lbl_creds.pack(side="left", padx=12, pady=6)
+
+        self.btn_load_creds = ctk.CTkButton(
+            self.creds_frame,
+            text="📂 Load client_secrets.json",
+            width=160,
+            height=26,
+            font=ctk.CTkFont(size=11),
+            command=self.load_credentials_file,
+        )
+        self.btn_load_creds.pack(side="right", padx=10, pady=6)
+
+        # Storage Status Card
+        status_card = ctk.CTkFrame(self, corner_radius=8)
+        status_card.pack(fill="x", padx=20, pady=(0, 8))
+
+        row1 = ctk.CTkFrame(status_card, fg_color="transparent")
+        row1.pack(fill="x", padx=12, pady=(8, 2))
+
+        self.lbl_local_info = ctk.CTkLabel(
+            row1,
+            text="💾 USB Pendrive: Scanning...",
+            font=ctk.CTkFont(size=11, weight="bold"),
+        )
+        self.lbl_local_info.pack(side="left")
+
+        self.lbl_cloud_info = ctk.CTkLabel(
+            row1,
+            text="☁️ Google Drive: Checking...",
+            font=ctk.CTkFont(size=11, weight="bold"),
+        )
+        self.lbl_cloud_info.pack(side="right")
+
+        row2 = ctk.CTkFrame(status_card, fg_color="transparent")
+        row2.pack(fill="x", padx=12, pady=(2, 8))
+
+        self.lbl_delta_info = ctk.CTkLabel(
+            row2,
+            text="Pending: 0 to upload | 0 to download",
+            font=ctk.CTkFont(size=11),
+            text_color="gray75",
+        )
+        self.lbl_delta_info.pack(side="left")
+
+        self.btn_refresh = ctk.CTkButton(
+            row2,
+            text="🔄 Scan",
+            width=65,
+            height=22,
+            font=ctk.CTkFont(size=10),
+            fg_color="#34495e",
+            hover_color="#415b76",
+            command=self.refresh_cloud_status,
+        )
+        self.btn_refresh.pack(side="right")
+
+        # Progress / Activity Frame
+        activity_frame = ctk.CTkFrame(self, corner_radius=8)
+        activity_frame.pack(fill="x", padx=20, pady=4)
+
+        self.lbl_step = ctk.CTkLabel(
+            activity_frame,
+            text="Ready to synchronize with Google Drive.",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#3498db",
+            wraplength=500,
+        )
+        self.lbl_step.pack(padx=15, pady=(8, 4))
+
+        self.progress_bar = ctk.CTkProgressBar(activity_frame, width=480, height=12)
+        self.progress_bar.set(0)
+        self.progress_bar.pack(padx=15, pady=(0, 6))
+
+        self.lbl_details = ctk.CTkLabel(
+            activity_frame,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color="gray70",
+        )
+        self.lbl_details.pack(padx=15, pady=(0, 6))
+
+        # Action Buttons Frame: Exactly Two Directional Sync Buttons
+        btn_action_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_action_frame.pack(fill="x", padx=20, pady=(6, 2))
+
+        self.btn_sync_local = ctk.CTkButton(
+            btn_action_frame,
+            text="💾 Sync with Local Data",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#2980b9",
+            hover_color="#3498db",
+            height=40,
+            command=self.start_sync_with_local,
+        )
+        self.btn_sync_local.pack(side="left", padx=(0, 6), expand=True, fill="x")
+
+        self.btn_sync_cloud = ctk.CTkButton(
+            btn_action_frame,
+            text="☁️ Sync with Cloud Data",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#27ae60",
+            hover_color="#2ecc71",
+            height=40,
+            command=self.start_sync_with_cloud,
+        )
+        self.btn_sync_cloud.pack(side="left", padx=(6, 0), expand=True, fill="x")
+
+        # Explanatory helper row beneath the buttons
+        hints_frame = ctk.CTkFrame(self, fg_color="transparent")
+        hints_frame.pack(fill="x", padx=20, pady=(0, 6))
+
+        lbl_hint_local = ctk.CTkLabel(
+            hints_frame,
+            text="USB is Master (Push to Cloud)",
+            font=ctk.CTkFont(size=10),
+            text_color="gray70",
+        )
+        lbl_hint_local.pack(side="left", padx=10)
+
+        lbl_hint_cloud = ctk.CTkLabel(
+            hints_frame,
+            text="Cloud is Master (Pull to USB)",
+            font=ctk.CTkFont(size=10),
+            text_color="gray70",
+        )
+        lbl_hint_cloud.pack(side="right", padx=10)
+
+        # Footer Frame
+        footer_frame = ctk.CTkFrame(self, fg_color="transparent")
+        footer_frame.pack(fill="x", padx=20, pady=(4, 12))
+
+        self.btn_close = ctk.CTkButton(
+            footer_frame,
+            text="Close",
+            fg_color="#7f8c8d",
+            hover_color="#95a5a6",
+            width=100,
+            height=32,
+            command=self.destroy,
+        )
+        self.btn_close.pack(side="right")
+
+        self.update_creds_display()
+        self.after(200, self.refresh_cloud_status)
+
+    def update_creds_display(self):
+        if self.auth.has_valid_client_config():
+            self.lbl_creds.configure(
+                text="✔ Google OAuth App Configured",
+                text_color="#2ecc71",
+            )
+            self.btn_load_creds.configure(text="Change JSON", width=100)
+            if not self._is_busy:
+                self.btn_sync_local.configure(state="normal")
+                self.btn_sync_cloud.configure(state="normal")
+        else:
+            self.lbl_creds.configure(
+                text="⚠️ client_secrets.json needed",
+                text_color="#f39c12",
+            )
+            self.btn_load_creds.configure(text="📂 Load client_secrets.json", width=170)
+            self.btn_sync_local.configure(state="disabled")
+            self.btn_sync_cloud.configure(state="disabled")
+
+    def _set_busy(self, is_busy: bool, active_btn=None, active_text=""):
+        self._is_busy = is_busy
+        state = "disabled" if is_busy else "normal"
+        self.btn_sync_local.configure(state=state)
+        self.btn_sync_cloud.configure(state=state)
+        self.btn_refresh.configure(state=state)
+        self.btn_close.configure(state=state)
+        self.btn_load_creds.configure(state=state)
+
+        if is_busy and active_btn:
+            active_btn.configure(text=active_text)
+        elif not is_busy:
+            self.btn_sync_local.configure(text="💾 Sync with Local Data")
+            self.btn_sync_cloud.configure(text="☁️ Sync with Cloud Data")
+
+    def load_credentials_file(self):
+        chosen = filedialog.askopenfilename(
+            title="Select Google OAuth client_secrets.json",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
+        )
+        if chosen:
+            if self.auth.set_client_config_from_file(chosen):
+                try:
+                    crypton_dir = VaultManager.get_crypton_dir(self.drive_path)
+                    os.makedirs(crypton_dir, exist_ok=True)
+                    dest = os.path.join(crypton_dir, "client_secrets.json")
+                    shutil.copy2(chosen, dest)
+                except Exception:
+                    pass
+                self.update_creds_display()
+                self.lbl_step.configure(
+                    text="✔ Credentials loaded! Ready to connect to Google Drive.",
+                    text_color="#2ecc71",
+                )
+                self.refresh_cloud_status()
+            else:
+                messagebox.showerror(
+                    "Invalid Credentials File",
+                    "The selected JSON file does not appear to be a valid Google OAuth client secrets file.\n"
+                    "Make sure it is downloaded from Google Cloud Console with 'installed' or 'web' keys.",
+                )
+
+    def refresh_cloud_status(self):
+        if self._is_busy:
+            return
+
+        def worker():
+            try:
+                local_dir = VaultManager.get_data_dir(self.drive_path)
+                local_chunks = GDriveSync.get_all_local_chunks(local_dir)
+                local_count = len(local_chunks)
+                self.after(0, lambda: self.lbl_local_info.configure(text=f"💾 USB Pendrive: {local_count} chunks"))
+
+                if self.auth.is_authenticated():
+                    status = self.sync_engine.get_sync_status(self.drive_path)
+                    self.after(0, lambda s=status: (
+                        self.lbl_cloud_info.configure(text=f"☁️ Google Drive: {s['cloud_chunks']} chunks"),
+                        self.lbl_delta_info.configure(
+                            text=f"Pending: {s['pending_upload']} to upload | {s['pending_download']} to download ({s['in_sync']} synced)"
+                        ),
+                    ))
+                elif self.auth.has_valid_client_config():
+                    self.after(0, lambda: (
+                        self.lbl_cloud_info.configure(text="☁️ Google Drive: Ready to connect"),
+                        self.lbl_delta_info.configure(text="Click an action button to sync with Google Drive."),
+                    ))
+                else:
+                    self.after(0, lambda: (
+                        self.lbl_cloud_info.configure(text="☁️ Google Drive: Not configured"),
+                        self.lbl_delta_info.configure(text="Load client_secrets.json above to enable cloud sync."),
+                    ))
+            except Exception as e:
+                self.after(0, lambda err=e: self.lbl_delta_info.configure(text=f"Status: {err}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_progress(self, message: str, current: int, total: int):
+        pct = current / max(1, total)
+        self.after(0, lambda msg=message, p=pct: (
+            self.lbl_step.configure(text=msg),
+            self.progress_bar.set(p),
+        ))
+
+    def start_sync_with_local(self):
+        self._set_busy(True, self.btn_sync_local, "⏳ Syncing to Cloud...")
+        self.lbl_step.configure(
+            text="Syncing with Local Data (mirroring USB to Google Drive)...",
+            text_color="#f39c12",
+        )
+        self.progress_bar.set(0.05)
+
+        def worker():
+            try:
+                stats = self.sync_engine.sync_with_local(
+                    self.drive_path,
+                    progress_callback=self._update_progress,
+                )
+                self.after(0, lambda s=stats: (
+                    self.lbl_step.configure(text="✔ Local sync complete! Google Drive matches USB.", text_color="#2ecc71"),
+                    self.lbl_details.configure(
+                        text=f"Uploaded: {s['uploaded_chunks']} chunks | Removed from cloud: {s['deleted_remote_chunks']} chunks"
+                    ),
+                    self.progress_bar.set(1.0),
+                    self._set_busy(False),
+                    self.refresh_cloud_status(),
+                ))
+            except Exception as e:
+                self.after(0, lambda err=e: (
+                    self.lbl_step.configure(text=f"✖ Sync failed: {err}", text_color="#e74c3c"),
+                    self._set_busy(False),
+                ))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def start_sync_with_cloud(self):
+        self._set_busy(True, self.btn_sync_cloud, "⏳ Syncing to USB...")
+        self.lbl_step.configure(
+            text="Syncing with Cloud Data (mirroring Google Drive to USB)...",
+            text_color="#f39c12",
+        )
+        self.progress_bar.set(0.05)
+
+        def worker():
+            try:
+                stats = self.sync_engine.sync_with_cloud(
+                    self.drive_path,
+                    progress_callback=self._update_progress,
+                )
+                self.after(0, lambda s=stats: (
+                    self.lbl_step.configure(text="✔ Cloud sync complete! USB matches Google Drive.", text_color="#2ecc71"),
+                    self.lbl_details.configure(
+                        text=f"Downloaded: {s['downloaded_chunks']} chunks | Removed from USB: {s['deleted_local_chunks']} chunks"
+                    ),
+                    self.progress_bar.set(1.0),
+                    self._set_busy(False),
+                    self.refresh_cloud_status(),
+                    getattr(self.master_app, "refresh_state", lambda: None)(),
+                ))
+            except Exception as e:
+                self.after(0, lambda err=e: (
+                    self.lbl_step.configure(text=f"✖ Sync failed: {err}", text_color="#e74c3c"),
+                    self._set_busy(False),
+                ))
+
+        threading.Thread(target=worker, daemon=True).start()
+
 
 
 def launch_gui(initial_dir: str = "."):

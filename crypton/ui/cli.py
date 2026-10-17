@@ -283,3 +283,67 @@ def config_cmd(
     else:
         console.print(f"[bold cyan]Crypton Performance Settings for {abs_drive}:[/bold cyan]")
         console.print(f"  • RAM Staging Limit: [bold green]{settings.get('ram_limit_mb', 32)} MB[/bold green]")
+
+
+@app.command(name="sync")
+def sync_cmd(
+    drive_path: str = typer.Argument(".", help="Path to USB drive or vault directory"),
+    local: bool = typer.Option(False, "--local", "-l", help="Sync with Local Data: USB is master (mirrors USB to Google Drive)"),
+    cloud: bool = typer.Option(False, "--cloud", "-c", help="Sync with Cloud Data: Cloud is master (mirrors Google Drive to USB)"),
+    status: bool = typer.Option(False, "--status", "-s", help="Inspect and display sync status delta"),
+):
+    """Sync encrypted vault chunks with Google Drive."""
+    abs_drive = os.path.abspath(drive_path)
+    if not cloud and not status and not VaultManager.is_vault(abs_drive):
+        console.print(f"[red]Error: No Crypton vault found at '{abs_drive}'.[/red]")
+        raise typer.Exit(code=1)
+
+    from crypton.sync.gdrive import GDriveSync, GDriveAuth, GDriveSyncError
+
+    console.print(Panel(
+        "[bold cyan]Crypton Google Drive Sync[/bold cyan]\n"
+        "• Zero-Knowledge: Only AES-256-GCM ciphertext chunks are synced.\n"
+        "• Zero-Footprint: OAuth tokens are kept in RAM and discarded immediately.",
+        border_style="cyan",
+    ))
+
+    auth = GDriveAuth(drive_path=abs_drive)
+    sync_engine = GDriveSync(auth=auth)
+
+    try:
+        if status:
+            with console.status("[bold green]Querying Google Drive status..."):
+                s = sync_engine.get_sync_status(abs_drive)
+            console.print(f"[bold cyan]Sync Status for '{abs_drive}':[/bold cyan]")
+            console.print(f"  • Local Chunks: [green]{s['local_chunks']}[/green]")
+            console.print(f"  • Cloud Chunks: [cyan]{s['cloud_chunks']}[/cyan]")
+            console.print(f"  • Pending Upload: [yellow]{s['pending_upload']}[/yellow]")
+            console.print(f"  • Pending Download: [yellow]{s['pending_download']}[/yellow]")
+            console.print(f"  • In Sync: [green]{s['in_sync']}[/green]")
+        elif cloud:
+            with console.status("[bold green]Syncing with Cloud Data (Google Drive -> USB)..."):
+                stats = sync_engine.sync_with_cloud(
+                    abs_drive,
+                    progress_callback=lambda msg, cur, tot: console.print(f"[dim]{msg}[/dim]"),
+                )
+            console.print(f"[bold green]✔ Cloud sync completed! USB matches Google Drive.[/bold green]")
+            console.print(f"  • Downloaded: [green]{stats['downloaded_chunks']}[/green] chunks")
+            console.print(f"  • Removed from USB: [yellow]{stats['deleted_local_chunks']}[/yellow] chunks")
+            console.print(f"  • Total Chunks: [cyan]{stats['total_remote_chunks']}[/cyan]")
+        else:
+            # Default is local master: mirror USB to Google Drive
+            with console.status("[bold green]Syncing with Local Data (USB -> Google Drive)..."):
+                stats = sync_engine.sync_with_local(
+                    abs_drive,
+                    progress_callback=lambda msg, cur, tot: console.print(f"[dim]{msg}[/dim]"),
+                )
+            console.print(f"[bold green]✔ Local sync completed! Google Drive matches USB.[/bold green]")
+            console.print(f"  • Uploaded: [green]{stats['uploaded_chunks']}[/green] chunks")
+            console.print(f"  • Removed from Cloud: [yellow]{stats['deleted_remote_chunks']}[/yellow] chunks")
+            console.print(f"  • Total Local Chunks: [green]{stats['total_local_chunks']}[/green]")
+    except Exception as e:
+        console.print(f"[bold red]✖ Sync failed: {e}[/bold red]")
+        raise typer.Exit(code=1)
+    finally:
+        auth.wipe_credentials()
+

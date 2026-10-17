@@ -8,15 +8,18 @@ Crypton turns any generic USB flash drive into a password-protected encrypted va
 
 ## ✨ Features
 
-- **Transparent On-the-Fly Mounting (FUSE):** Unlocking your drive mounts a virtual filesystem (`Vault_Unlocked`). Drag and drop, view, or edit files normally in your native file manager (Nautilus, Dolphin, Explorer)—encryption happens invisibly in real-time.
+- **Transparent On-the-Fly Mounting:** Unlocking your drive transparently mounts a virtual filesystem (`Vault_Unlocked` via native FUSE on Linux; virtual drive letter `Z:\` via zero-driver mounting on Windows). Drag and drop, view, or edit files normally in your native file manager (Nautilus, Dolphin, Explorer)—encryption happens invisibly in real-time.
 - **Fast RAM Staging Pipeline:** USB flash memory has notoriously slow write speeds (1–2 MB/s). Staging writes through high-speed memory (`/dev/shm`) eliminates double-write penalties and doubles copy speeds.
 - **Auto Self-Healing:** Entering your master password silently detects and repairs any orphaned or externally deleted files in the encrypted manifest without annoying prompt dialogs.
+- **Zero-Driver Portability:** Designed to work out-of-the-box on locked-down school, university, or library PCs without requiring administrator privileges or driver installations.
 - **Envelope Encryption (Key Wrapping):**
   - Master Vault Key (MVK): 256-bit AES-GCM.
   - Key Derivation: **Argon2id** (GPU/ASIC-resistant memory-hard KDF).
   - Password change in **<100ms** (only the 32-byte MVK is re-wrapped; files are never re-encrypted).
-- **Chunked Authenticated Streaming:** Files are split into 64 KB authenticated chunks with HKDF-derived keys and Additional Authenticated Data (AAD) tracking chunk indexes to prevent block tampering and reordering.
 - **Developer & Performance Settings:** Live `/dev/shm` RAM inspector and customizable RAM staging limits (`16MB` to `1024MB`).
+- **Zero-Knowledge Google Drive Cloud Sync:**
+  - **End-to-End Encrypted Cloud Backup:** Back up ciphertext chunks (`.crypton/data/`) and headers directly to Google Drive (`Crypton_Vault_Backups`). Google only ever sees scrambled AES-256-GCM blocks.
+  - **Directional Sync Control:** One-click **💾 Sync with Local Data (Push to Cloud)** (USB is master; uploads new chunks and prunes deleted files from Drive) and **☁️ Sync with Cloud Data (Pull to USB)** (Drive is master; pulls cloud chunks to USB and prunes extra local files).
 
 ---
 
@@ -24,11 +27,12 @@ Crypton turns any generic USB flash drive into a password-protected encrypted va
 
 ### Prerequisites
 - **Python:** 3.9 or higher
-- **Linux:** FUSE (`libfuse3` or `fuse3`, pre-installed on most distributions):
+- **Linux:** FUSE (`libfuse3` or `fuse3`, pre-installed by default on modern Linux distros):
   ```bash
-  # Ubuntu / Debian
+  # Ubuntu / Debian (if not already installed)
   sudo apt install libfuse3-3 fuse3
   ```
+- **Windows:** Zero external dependencies or drivers required. Windows uses its built-in WebClient service to mount virtual drives without administrator rights.
 
 ### 1. Clone the Repository
 ```bash

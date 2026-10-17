@@ -3,9 +3,16 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
-hiddenimports = ['fuse']
+hiddenimports = ['fuse', 'googleapiclient', 'google_auth_oauthlib', 'google.auth']
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+for pkg in ['google_auth_oauthlib', 'googleapiclient']:
+    try:
+        ret = collect_all(pkg)
+        datas += ret[0]; binaries += ret[1]; hiddenimports += ret[2]
+    except Exception:
+        pass
 
 
 a = Analysis(
