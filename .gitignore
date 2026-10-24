@@ -40,7 +40,11 @@ Thumbs.db
 # Local credentials, scratch & internal developer notes
 client_secrets.json
 scratch/
+*handoff*.md
 *HANDOFF*.md
 GUI_SPECIFICATION.md
+tests/
+vault_backup/
+
 
 

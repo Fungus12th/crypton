@@ -7,10 +7,27 @@ import hashlib
 import threading
 import subprocess
 import concurrent.futures
-from typing import Dict, Any, Optional, Tuple
+import io
+import mimetypes
+import socket
+import urllib.request
+from typing import Dict, Any, Optional, Tuple, List
+
+from wsgidav.dav_provider import DAVProvider, DAVCollection, DAVNonCollection
+from wsgidav.dav_error import DAVError, HTTP_FORBIDDEN, HTTP_NOT_FOUND
+from wsgidav.wsgidav_app import WsgiDAVApp
+from cheroot import wsgi
 
 from crypton.core.vault import VaultManager
-from crypton.core.crypto import derive_file_key, encrypt_file, decrypt_file
+from crypton.core.crypto import (
+    derive_file_key,
+    encrypt_file,
+    decrypt_file,
+    encrypt_stream,
+    VaultStreamReader,
+    FlushTracker,
+    CHUNK_SIZE,
+)
 
 
 def get_available_drive_letter() -> str:
@@ -76,9 +93,10 @@ def _find_fastest_staging_root() -> str:
 class WindowsVaultFS:
     """Zero-privilege transparent virtual drive filesystem for Windows using subst + real-time sync."""
 
-    def __init__(self, drive_path: str, mvk: bytes, ram_limit_mb: Optional[int] = None, target_mountpoint: Optional[str] = None):
+    def __init__(self, drive_path: str, mvk: bytes, ram_limit_mb: Optional[int] = None, target_mountpoint: Optional[str] = None, read_only: bool = False):
         self.drive_path = os.path.abspath(drive_path)
         self.mvk = mvk
+        self.read_only = bool(read_only)
 
         if ram_limit_mb is None:
             settings = VaultManager.get_settings(drive_path)
@@ -248,14 +266,19 @@ class WindowsVaultFS:
 
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             subprocess.run(["subst", letter, self.staging_dir], check=True, creationflags=flags)
-            self._set_drive_label_and_icon(letter, "Crypton Vault")
+            label = "Crypton Vault (Read-Only)" if self.read_only else "Crypton Vault"
+            self._set_drive_label_and_icon(letter, label)
         else:
             self.mountpoint = self.staging_dir
             self.populate_initial_state()
 
-        self._stop_event.clear()
-        self._sync_thread = threading.Thread(target=self._sync_worker, daemon=True)
-        self._sync_thread.start()
+        if not self.read_only:
+            self._stop_event.clear()
+            self._sync_thread = threading.Thread(target=self._sync_worker, daemon=True)
+            self._sync_thread.start()
+
+    def get_flush_status(self) -> dict:
+        return {"is_flushing": False, "progress_pct": 100.0, "pending_chunks": 0, "active_files": 0}
 
     def _sync_worker(self):
         """Kernel-assisted event-driven background thread monitoring staging folder with zero idle CPU/disk overhead."""
@@ -302,7 +325,7 @@ class WindowsVaultFS:
 
     def sync_changes(self, force: bool = False):
         """Detect modified, new, or deleted files in staging and flush encrypted blocks to USB."""
-        if not os.path.isdir(self.staging_dir):
+        if not os.path.isdir(self.staging_dir) or self.read_only:
             return
 
         with self._lock:
@@ -456,15 +479,411 @@ class WindowsVaultFS:
             threading.Thread(target=_clean, daemon=True).start()
 
 
+class CryptonDAVCollection(DAVCollection):
+    """Virtual directory resource backed by in-memory manifest."""
+
+    def __init__(self, path: str, environ: dict, rel_path: str = ""):
+        super().__init__(path, environ)
+        self.rel_path = rel_path.strip("/")
+
+    def get_member_names(self) -> List[str]:
+        prefix = (self.rel_path + "/") if self.rel_path else ""
+        children = set()
+        with self.provider._lock:
+            for k in self.provider.manifest.keys():
+                if not prefix or k.startswith(prefix):
+                    rem = k[len(prefix):]
+                    name = rem.split("/")[0]
+                    if name:
+                        children.add(name)
+            for k in self.provider._staging_buffers.keys():
+                if not prefix or k.startswith(prefix):
+                    rem = k[len(prefix):]
+                    name = rem.split("/")[0]
+                    if name:
+                        children.add(name)
+            for vdir in self.provider.virtual_dirs:
+                vclean = vdir.strip("/")
+                if not prefix or vclean.startswith(prefix):
+                    rem = vclean[len(prefix):]
+                    name = rem.split("/")[0]
+                    if name:
+                        children.add(name)
+        return sorted(list(children))
+
+    def get_member(self, name: str):
+        child_path = f"{self.path.rstrip('/')}/{name}"
+        return self.provider.get_resource_inst(child_path, self.environ)
+
+    def create_empty_resource(self, name: str):
+        if self.provider.read_only:
+            raise DAVError(HTTP_FORBIDDEN, "Vault is mounted in Read-Only Paranoia Mode")
+        child_rel = f"{self.rel_path}/{name}".strip("/") if self.rel_path else name
+        child_path = f"{self.path.rstrip('/')}/{name}"
+        with self.provider._lock:
+            self.provider._staging_buffers[child_rel] = b""
+        return self.provider.get_resource_inst(child_path, self.environ)
+
+    def create_collection(self, name: str):
+        if self.provider.read_only:
+            raise DAVError(HTTP_FORBIDDEN, "Vault is mounted in Read-Only Paranoia Mode")
+        child_rel = f"{self.rel_path}/{name}".strip("/") if self.rel_path else name
+        with self.provider._lock:
+            self.provider.virtual_dirs.add(child_rel)
+        child_path = f"{self.path.rstrip('/')}/{name}"
+        return self.provider.get_resource_inst(child_path, self.environ)
+
+    def delete(self):
+        if self.provider.read_only:
+            raise DAVError(HTTP_FORBIDDEN, "Vault is mounted in Read-Only Paranoia Mode")
+        self.provider.delete_dir(self.rel_path)
+
+    def support_recursive_delete(self) -> bool:
+        return True
+
+
+class _CaptureBytesIO(io.BytesIO):
+    """Memory buffer that preserves payload even after WsgiDAV calls close()."""
+
+    def __init__(self):
+        super().__init__()
+        self.captured_bytes = b""
+
+    def close(self):
+        if not self.closed:
+            self.captured_bytes = self.getvalue()
+        super().close()
+
+
+class CryptonDAVFile(DAVNonCollection):
+    """Virtual file resource streaming 64 KB AES-GCM chunks on-demand via HTTP Range."""
+
+    def __init__(self, path: str, environ: dict, rel_path: str):
+        super().__init__(path, environ)
+        self.rel_path = rel_path
+        self._write_buf: Optional[_CaptureBytesIO] = None
+
+    def get_content_length(self) -> int:
+        with self.provider._lock:
+            if self.rel_path in self.provider._staging_buffers:
+                return len(self.provider._staging_buffers[self.rel_path])
+            if self.rel_path in self.provider.manifest:
+                return self.provider.manifest[self.rel_path].get("size", 0)
+        return 0
+
+    def get_content_type(self) -> str:
+        mime, _ = mimetypes.guess_type(self.name)
+        return mime or "application/octet-stream"
+
+    def get_last_modified(self) -> float:
+        with self.provider._lock:
+            if self.rel_path in self.provider.manifest:
+                return self.provider.manifest[self.rel_path].get("mtime", time.time())
+        return time.time()
+
+    def support_ranges(self) -> bool:
+        return True
+
+    def support_content_length(self) -> bool:
+        return True
+
+    def support_modified(self) -> bool:
+        return True
+
+    def support_etag(self) -> bool:
+        return True
+
+    def get_etag(self) -> str:
+        sz = self.get_content_length()
+        mt = self.get_last_modified()
+        return hashlib.md5(f"{self.rel_path}-{sz}-{mt}".encode()).hexdigest()
+
+    def get_content(self):
+        with self.provider._lock:
+            if self.rel_path in self.provider._staging_buffers:
+                return io.BytesIO(self.provider._staging_buffers[self.rel_path])
+
+            if self.rel_path not in self.provider.manifest:
+                return io.BytesIO(b"")
+
+            rec = self.provider.manifest[self.rel_path]
+            file_id = rec["file_id"]
+            enc_rel = rec.get("enc_rel_path", file_id)
+            enc_path = os.path.join(VaultManager.get_data_dir(self.provider.drive_path), enc_rel)
+
+            if not os.path.isfile(enc_path):
+                flat = os.path.join(VaultManager.get_data_dir(self.provider.drive_path), file_id)
+                if os.path.isfile(flat):
+                    enc_path = flat
+
+            if not os.path.isfile(enc_path):
+                return io.BytesIO(b"")
+
+            file_key = derive_file_key(self.provider.mvk, file_id)
+            f_size = rec.get("size", 0)
+            return VaultStreamReader(enc_path, file_key, f_size)
+
+    def begin_write(self, *, content_type=None):
+        if self.provider.read_only:
+            raise DAVError(HTTP_FORBIDDEN, "Vault is mounted in Read-Only Paranoia Mode")
+        self._write_buf = _CaptureBytesIO()
+        return self._write_buf
+
+    def end_write(self, *, with_errors=False):
+        if self.provider.read_only:
+            return
+        if with_errors or self._write_buf is None:
+            self._write_buf = None
+            return
+
+        payload = self._write_buf.captured_bytes
+        self._write_buf = None
+        with self.provider._lock:
+            self.provider._staging_buffers[self.rel_path] = payload
+        self.provider.queue_async_encrypt(self.rel_path, payload)
+
+    def delete(self):
+        if self.provider.read_only:
+            raise DAVError(HTTP_FORBIDDEN, "Vault is mounted in Read-Only Paranoia Mode")
+        self.provider.delete_file(self.rel_path)
+
+
+class CryptonDAVProvider(DAVProvider):
+    """In-memory zero-unpacking WebDAV provider backed directly by encrypted vault data."""
+
+    def __init__(self, drive_path: str, mvk: bytes, read_only: bool = False, tracker: Optional[FlushTracker] = None):
+        super().__init__()
+        self.drive_path = os.path.abspath(drive_path)
+        self.mvk = mvk
+        self.read_only = bool(read_only)
+        self.tracker = tracker or FlushTracker()
+        self.manifest = VaultManager._load_manifest(self.drive_path, self.mvk)
+        self._staging_buffers: Dict[str, bytes] = {}
+        self.virtual_dirs: set = set()
+        self._lock = threading.RLock()
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        self._pending_futures = set()
+
+        # Pre-populate virtual directories from manifest
+        for rel in self.manifest.keys():
+            parts = rel.strip("/").split("/")
+            for i in range(1, len(parts)):
+                self.virtual_dirs.add("/".join(parts[:i]))
+
+    def is_readonly(self) -> bool:
+        return self.read_only
+
+    def get_resource_inst(self, path: str, environ: dict) -> Optional[Any]:
+        if "wsgidav.provider" not in environ:
+            environ["wsgidav.provider"] = self
+        clean = path.strip("/").replace("\\", "/")
+        with self._lock:
+            if clean == "":
+                return CryptonDAVCollection("/", environ, rel_path="")
+            if clean in self._staging_buffers or clean in self.manifest:
+                return CryptonDAVFile(path, environ, rel_path=clean)
+            if clean in self.virtual_dirs:
+                return CryptonDAVCollection(path, environ, rel_path=clean)
+            prefix = clean + "/"
+            if any(k.startswith(prefix) for k in self.manifest.keys()) or any(k.startswith(prefix) for k in self._staging_buffers.keys()):
+                return CryptonDAVCollection(path, environ, rel_path=clean)
+        return None
+
+    def queue_async_encrypt(self, rel_path: str, data: bytes):
+        if self.read_only:
+            return
+        num_chunks = max(1, (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE)
+        self.tracker.add_work(num_chunks)
+        fut = self._executor.submit(self._async_encrypt_task, rel_path, data)
+        with self._lock:
+            self._pending_futures.add(fut)
+            fut.add_done_callback(lambda f: self._pending_futures.discard(f))
+
+    def _async_encrypt_task(self, rel_path: str, data: bytes):
+        try:
+            file_id = uuid.uuid4().hex
+            enc_rel = VaultManager._get_encrypted_rel_path(self.mvk, rel_path, file_id)
+            dst_enc = os.path.join(VaultManager.get_data_dir(self.drive_path), enc_rel)
+            os.makedirs(os.path.dirname(dst_enc), exist_ok=True)
+            file_key = derive_file_key(self.mvk, file_id)
+
+            sha256 = hashlib.sha256(data).hexdigest()
+            with open(dst_enc, "wb") as f_out:
+                encrypt_stream(
+                    io.BytesIO(data),
+                    f_out,
+                    file_key,
+                    chunk_callback=lambda idx, sz: self.tracker.chunk_done(),
+                )
+
+            with self._lock:
+                old_rec = self.manifest.get(rel_path)
+                if old_rec:
+                    old_enc = os.path.join(
+                        VaultManager.get_data_dir(self.drive_path),
+                        old_rec.get("enc_rel_path", old_rec.get("file_id", "")),
+                    )
+                    if os.path.isfile(old_enc) and old_enc != dst_enc:
+                        try:
+                            os.remove(old_enc)
+                        except OSError:
+                            pass
+
+                self.manifest[rel_path] = {
+                    "file_id": file_id,
+                    "enc_rel_path": enc_rel,
+                    "rel_path": rel_path,
+                    "size": len(data),
+                    "mtime": time.time(),
+                    "sha256": sha256,
+                    "encrypted_at": time.time(),
+                }
+                VaultManager._save_manifest(self.drive_path, self.mvk, self.manifest)
+                self._staging_buffers.pop(rel_path, None)
+        except Exception as e:
+            print(f"[Crypton WebDAV Encrypt Error] {rel_path}: {e}", file=sys.stderr)
+        finally:
+            self.tracker.file_done()
+
+    def delete_file(self, rel_path: str):
+        with self._lock:
+            self._staging_buffers.pop(rel_path, None)
+            rec = self.manifest.pop(rel_path, None)
+            if rec:
+                enc_rel = rec.get("enc_rel_path", rec.get("file_id", ""))
+                enc_file = os.path.join(VaultManager.get_data_dir(self.drive_path), enc_rel)
+                if os.path.isfile(enc_file):
+                    try:
+                        os.remove(enc_file)
+                    except OSError:
+                        pass
+                VaultManager._save_manifest(self.drive_path, self.mvk, self.manifest)
+
+    def delete_dir(self, rel_dir: str):
+        prefix = (rel_dir.strip("/") + "/") if rel_dir else ""
+        with self._lock:
+            self.virtual_dirs.discard(rel_dir)
+            to_del = [k for k in self.manifest.keys() if not prefix or k.startswith(prefix)]
+            for k in to_del:
+                self.delete_file(k)
+            for k in list(self._staging_buffers.keys()):
+                if not prefix or k.startswith(prefix):
+                    self._staging_buffers.pop(k, None)
+
+    def get_flush_status(self) -> dict:
+        return self.tracker.get_flush_status()
+
+    def shutdown(self):
+        self._executor.shutdown(wait=True)
+        if not self.read_only:
+            with self._lock:
+                VaultManager._save_manifest(self.drive_path, self.mvk, self.manifest)
+
+
+class WindowsWebDAVServer:
+    """Ephemeral localhost WebDAV server providing transparent on-demand virtual drive mounting."""
+
+    def __init__(self, drive_path: str, mvk: bytes, read_only: bool = False, target_mountpoint: Optional[str] = None):
+        self.drive_path = os.path.abspath(drive_path)
+        self.mvk = mvk
+        self.read_only = bool(read_only)
+        clean_target = (target_mountpoint or "").rstrip("\\/ ")
+        if clean_target and len(clean_target) in (1, 2) and (clean_target.endswith(":") or len(clean_target) == 1):
+            letter = clean_target[0].upper()
+            self.drive_letter = f"{letter}:"
+        else:
+            self.drive_letter = get_available_drive_letter()
+
+        self.mountpoint = f"{self.drive_letter}\\"
+        self.port: Optional[int] = None
+        self.server: Optional[wsgi.Server] = None
+        self.provider: Optional[CryptonDAVProvider] = None
+        self._server_thread: Optional[threading.Thread] = None
+
+    def start(self):
+        # 1. Ephemeral port allocation (zero collisions)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        self.port = sock.getsockname()[1]
+        sock.close()
+
+        # 2. Launch WsgiDAVApp on Cheroot server
+        self.provider = CryptonDAVProvider(self.drive_path, self.mvk, read_only=self.read_only)
+        config = {
+            "host": "127.0.0.1",
+            "port": self.port,
+            "provider_mapping": {"/": self.provider},
+            "simple_dc": {"user_mapping": {"*": True}},
+            "verbose": 0,
+            "logging": {"enable": False},
+        }
+        app = WsgiDAVApp(config)
+        self.server = wsgi.Server(bind_addr=("127.0.0.1", self.port), wsgi_app=app)
+        self._server_thread = threading.Thread(target=self.server.start, daemon=True)
+        self._server_thread.start()
+
+        # Wait up to 2 seconds for server to be responsive
+        ready = False
+        for _ in range(20):
+            time.sleep(0.1)
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=0.5):
+                    ready = True
+                    break
+            except Exception:
+                pass
+
+        if not ready:
+            raise RuntimeError(f"Localhost WebDAV server failed to bind on 127.0.0.1:{self.port}")
+
+        # 3. Mount on Windows Explorer via net use if on Windows
+        if sys.platform == "win32":
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.run(["net", "use", self.drive_letter, "/delete", "/y"], capture_output=True, creationflags=flags)
+            cmd = ["net", "use", self.drive_letter, f"http://127.0.0.1:{self.port}/", "/persistent:no"]
+            res = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
+            if res.returncode != 0:
+                raise RuntimeError(f"'net use' failed with error: {res.stderr or res.stdout}")
+            label = "Crypton Vault (Read-Only)" if self.read_only else "Crypton Vault"
+            WindowsVaultFS._set_drive_label_and_icon(self.drive_letter, label)
+
+    def get_flush_status(self) -> dict:
+        if self.provider:
+            return self.provider.get_flush_status()
+        return {"is_flushing": False, "progress_pct": 100.0, "pending_chunks": 0}
+
+    def stop(self):
+        if self.provider:
+            self.provider.shutdown()
+
+        if sys.platform == "win32" and self.drive_letter:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.run(["net", "use", self.drive_letter, "/delete", "/y"], capture_output=True, creationflags=flags)
+            WindowsVaultFS._remove_drive_label_and_icon(self.drive_letter)
+
+        if self.server:
+            try:
+                self.server.stop()
+            except Exception:
+                pass
+            self.server = None
+
+
 class WindowsVaultMountService:
     """Windows mount service providing transparent high-speed virtual drive mounting or folder mounting."""
 
-    _active_fs: Optional[WindowsVaultFS] = None
+    _active_service: Optional[Any] = None
 
     @classmethod
     def update_ram_limit(cls, limit_mb: int):
-        if cls._active_fs:
-            cls._active_fs.update_ram_limit(limit_mb)
+        if cls._active_service and hasattr(cls._active_service, "update_ram_limit"):
+            cls._active_service.update_ram_limit(limit_mb)
+
+    @classmethod
+    def get_flush_status(cls) -> dict:
+        if cls._active_service and hasattr(cls._active_service, "get_flush_status"):
+            return cls._active_service.get_flush_status()
+        return {"is_flushing": False, "progress_pct": 100.0, "pending_chunks": 0}
 
     @staticmethod
     def get_default_mountpoint(drive_path: str) -> str:
@@ -472,18 +891,33 @@ class WindowsVaultMountService:
         return f"{letter}\\"
 
     @classmethod
-    def mount(cls, drive_path: str, mvk: bytes, mountpoint: Optional[str] = None) -> Tuple[str, threading.Thread]:
+    def mount(
+        cls,
+        drive_path: str,
+        mvk: bytes,
+        mountpoint: Optional[str] = None,
+        read_only: bool = False,
+    ) -> Tuple[str, threading.Thread]:
+        # Try WebDAV on-demand engine first (Phase 1)
+        try:
+            dav_srv = WindowsWebDAVServer(drive_path, mvk, read_only=read_only, target_mountpoint=mountpoint)
+            dav_srv.start()
+            cls._active_service = dav_srv
+            t = threading.Thread(target=lambda: None, daemon=True)
+            t.start()
+            return dav_srv.mountpoint, t
+        except Exception as e:
+            print(f"[Crypton Warning] WebDAV mount failed ({e}). Falling back to subst engine...", file=sys.stderr)
+
+        # Fallback to legacy subst engine if WebDAV/WebClient service is unavailable
         if not mountpoint:
             mountpoint = cls.get_default_mountpoint(drive_path)
 
-        fs = WindowsVaultFS(drive_path, mvk, target_mountpoint=mountpoint)
-        cls._active_fs = fs
-
+        fs = WindowsVaultFS(drive_path, mvk, target_mountpoint=mountpoint, read_only=read_only)
+        cls._active_service = fs
         fs.start(mountpoint)
 
-        # Dummy thread for interface compatibility
-        t = threading.Thread(target=lambda: None)
-        t.daemon = True
+        t = threading.Thread(target=lambda: None, daemon=True)
         t.start()
 
         display_mount = fs.mountpoint or mountpoint
@@ -491,12 +925,12 @@ class WindowsVaultMountService:
 
     @classmethod
     def unmount(cls, mountpoint: str) -> bool:
-        if cls._active_fs:
+        if cls._active_service:
             try:
-                cls._active_fs.stop()
+                cls._active_service.stop()
             except Exception as e:
                 print(f"[Crypton Unmount Error] {e}", file=sys.stderr)
-            cls._active_fs = None
+            cls._active_service = None
 
         clean = mountpoint.rstrip("\\/ ")
         if clean and len(clean) in (1, 2) and (clean.endswith(":") or len(clean) == 1):

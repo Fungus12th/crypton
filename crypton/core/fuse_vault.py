@@ -19,7 +19,7 @@ except ImportError:
     Operations = object
 
 from crypton.core.vault import VaultManager, VaultError
-from crypton.core.crypto import derive_file_key, encrypt_file, decrypt_file
+from crypton.core.crypto import derive_file_key, encrypt_file, decrypt_file, FlushTracker, CHUNK_SIZE
 
 
 DEFAULT_RAM_LIMIT_MB = 32
@@ -28,9 +28,11 @@ DEFAULT_RAM_LIMIT_MB = 32
 class CryptonFS(Operations):
     """High-speed transparent on-the-fly FUSE filesystem for Crypton Vault."""
 
-    def __init__(self, drive_path: str, mvk: bytes, ram_limit_mb: Optional[int] = None):
+    def __init__(self, drive_path: str, mvk: bytes, ram_limit_mb: Optional[int] = None, read_only: bool = False):
         self.drive_path = drive_path
         self.mvk = mvk
+        self.read_only = bool(read_only)
+        self.tracker = FlushTracker()
         self.tmp_dir = os.path.join(drive_path, ".crypton", "tmp")
         os.makedirs(self.tmp_dir, exist_ok=True)
 
@@ -204,6 +206,8 @@ class CryptonFS(Operations):
         return dirents
 
     def mkdir(self, path: str, mode):
+        if self.read_only:
+            raise FuseOSError(errno.EROFS)
         with self._lock:
             self.virtual_dirs.add(path)
             stg = self._get_file_staging_path(self._clean_path(path))
@@ -211,6 +215,8 @@ class CryptonFS(Operations):
         return 0
 
     def rmdir(self, path: str):
+        if self.read_only:
+            raise FuseOSError(errno.EROFS)
         rel = self._clean_path(path)
         with self._lock:
             self.virtual_dirs.discard(path)
@@ -230,6 +236,8 @@ class CryptonFS(Operations):
         return 0
 
     def unlink(self, path: str):
+        if self.read_only:
+            raise FuseOSError(errno.EROFS)
         rel = self._clean_path(path)
         with self._lock:
             stg = self._get_file_staging_path(rel)
@@ -245,6 +253,8 @@ class CryptonFS(Operations):
         return 0
 
     def rename(self, old: str, new: str):
+        if self.read_only:
+            raise FuseOSError(errno.EROFS)
         old_rel = self._clean_path(old)
         new_rel = self._clean_path(new)
 
@@ -268,6 +278,8 @@ class CryptonFS(Operations):
 
     # ================= FILE READ / WRITE OPERATIONS =================
     def open(self, path: str, flags):
+        if self.read_only and (flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC)):
+            raise FuseOSError(errno.EROFS)
         rel = self._clean_path(path)
         staging_path = self._get_file_staging_path(rel)
 
@@ -309,6 +321,8 @@ class CryptonFS(Operations):
         return fh
 
     def create(self, path: str, mode, fi=None):
+        if self.read_only:
+            raise FuseOSError(errno.EROFS)
         rel = self._clean_path(path)
         staging_path = self._get_file_staging_path(rel)
 
@@ -336,6 +350,8 @@ class CryptonFS(Operations):
         return os.read(h_info["fd"], size)
 
     def write(self, path: str, data: bytes, offset: int, fh: int):
+        if self.read_only:
+            raise FuseOSError(errno.EROFS)
         with self._lock:
             h_info = self._open_handles.get(fh)
         if not h_info:
@@ -345,6 +361,8 @@ class CryptonFS(Operations):
         return os.write(h_info["fd"], data)
 
     def truncate(self, path: str, length: int, fh=None):
+        if self.read_only:
+            raise FuseOSError(errno.EROFS)
         with self._lock:
             if fh is not None and fh in self._open_handles:
                 os.ftruncate(self._open_handles[fh]["fd"], length)
@@ -354,6 +372,16 @@ class CryptonFS(Operations):
                 if os.path.isfile(stg):
                     with open(stg, "r+b") as f:
                         f.truncate(length)
+        return 0
+
+    def chmod(self, path: str, mode: int):
+        if self.read_only:
+            raise FuseOSError(errno.EROFS)
+        return 0
+
+    def chown(self, path: str, uid: int, gid: int):
+        if self.read_only:
+            raise FuseOSError(errno.EROFS)
         return 0
 
     def release(self, path: str, fh: int):
@@ -366,7 +394,7 @@ class CryptonFS(Operations):
         rel = h_info["path"]
         staging_path = h_info["staging_path"]
 
-        if h_info["writing"] and os.path.isfile(staging_path):
+        if h_info["writing"] and os.path.isfile(staging_path) and not self.read_only:
             try:
                 f_size = os.path.getsize(staging_path)
                 f_mtime = os.path.getmtime(staging_path)
@@ -375,6 +403,8 @@ class CryptonFS(Operations):
                 f_mtime = time.time()
 
             # Asynchronous background encryption to USB: caller returns immediately at RAM speed
+            num_chunks = max(1, (f_size + CHUNK_SIZE - 1) // CHUNK_SIZE)
+            self.tracker.add_work(num_chunks)
             try:
                 task = self._executor.submit(self._async_encrypt_to_usb, rel, staging_path, f_size, f_mtime)
                 with self._lock:
@@ -388,6 +418,7 @@ class CryptonFS(Operations):
 
     def _async_encrypt_to_usb(self, rel: str, staging_path: str, f_size: int, f_mtime: float):
         if not os.path.isfile(staging_path):
+            self.tracker.file_done()
             return
 
         try:
@@ -403,7 +434,12 @@ class CryptonFS(Operations):
             os.makedirs(os.path.dirname(dst_enc), exist_ok=True)
             file_key = derive_file_key(self.mvk, file_id)
 
-            encrypt_file(staging_path, dst_enc, file_key)
+            encrypt_file(
+                staging_path,
+                dst_enc,
+                file_key,
+                chunk_callback=lambda idx, sz: self.tracker.chunk_done(),
+            )
 
             with self._lock:
                 if rel in self.manifest:
@@ -432,6 +468,11 @@ class CryptonFS(Operations):
                 self.flush_manifest(force=False)
         except Exception as e:
             print(f"[Crypton FUSE Async Encrypt Error] {rel}: {e}", file=sys.stderr)
+        finally:
+            self.tracker.file_done()
+
+    def get_flush_status(self) -> dict:
+        return self.tracker.get_flush_status()
 
 
 class VaultMountService:
@@ -445,13 +486,25 @@ class VaultMountService:
         if cls._active_fs:
             cls._active_fs.update_ram_limit(limit_mb)
 
+    @classmethod
+    def get_flush_status(cls) -> dict:
+        if cls._active_fs:
+            return cls._active_fs.get_flush_status()
+        return {"is_flushing": False, "progress_pct": 100.0, "pending_chunks": 0, "active_files": 0}
+
     @staticmethod
     def get_default_mountpoint(drive_path: str) -> str:
         mount_dir = os.path.join(drive_path, "Vault_Unlocked")
         return mount_dir
 
     @classmethod
-    def mount(cls, drive_path: str, mvk: bytes, mountpoint: Optional[str] = None) -> tuple[str, threading.Thread]:
+    def mount(
+        cls,
+        drive_path: str,
+        mvk: bytes,
+        mountpoint: Optional[str] = None,
+        read_only: bool = False,
+    ) -> tuple[str, threading.Thread]:
         if FUSE is None:
             raise RuntimeError("FUSE is not installed on this system.")
 
@@ -460,12 +513,12 @@ class VaultMountService:
 
         os.makedirs(mountpoint, exist_ok=True)
 
-        fs = CryptonFS(drive_path, mvk)
+        fs = CryptonFS(drive_path, mvk, read_only=read_only)
         cls._active_fs = fs
 
         def runner():
             try:
-                FUSE(fs, mountpoint, foreground=True, nothreads=True)
+                FUSE(fs, mountpoint, foreground=True, nothreads=True, ro=read_only)
             except Exception as e:
                 print(f"[Crypton FUSE Error] {e}", file=sys.stderr)
 
@@ -485,15 +538,23 @@ class VaultMountService:
         if cls._active_fs:
             try:
                 cls._active_fs.cleanup()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Crypton FUSE Cleanup Error] {e}", file=sys.stderr)
             cls._active_fs = None
 
-        if not os.path.exists(mountpoint):
+        if not mountpoint or not os.path.exists(mountpoint):
             return True
 
-        # Try fusermount3, fusermount, umount
-        for cmd in [["fusermount3", "-u", mountpoint], ["fusermount", "-u", mountpoint], ["umount", mountpoint]]:
+        # Unmount commands: standard unmount followed by lazy unmount (-z) if busy
+        cmds = [
+            ["fusermount3", "-u", mountpoint],
+            ["fusermount3", "-u", "-z", mountpoint],
+            ["fusermount", "-u", mountpoint],
+            ["fusermount", "-u", "-z", mountpoint],
+            ["umount", mountpoint],
+            ["umount", "-l", mountpoint],
+        ]
+        for cmd in cmds:
             try:
                 res = subprocess.run(cmd, capture_output=True, timeout=5)
                 if res.returncode == 0:
@@ -501,11 +562,20 @@ class VaultMountService:
             except (subprocess.SubprocessError, FileNotFoundError):
                 continue
 
-        # Clean empty mountpoint folder
-        try:
-            if os.path.isdir(mountpoint) and not os.listdir(mountpoint):
-                os.rmdir(mountpoint)
-        except OSError:
-            pass
+        # Wait up to 3 seconds for OS kernel to release the mount point
+        for _ in range(30):
+            if not os.path.ismount(mountpoint):
+                break
+            time.sleep(0.1)
 
-        return True
+        # Clean empty mountpoint folder with retry delay for kernel release
+        for _ in range(15):
+            try:
+                if os.path.isdir(mountpoint) and not os.listdir(mountpoint):
+                    os.rmdir(mountpoint)
+                    break
+            except OSError:
+                pass
+            time.sleep(0.1)
+
+        return not os.path.ismount(mountpoint)

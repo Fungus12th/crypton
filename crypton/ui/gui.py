@@ -39,6 +39,7 @@ THEME = {
     "cloud": "#147A65",          # Deep sea-green (Sync)
     "cloud_hover": "#0E5848",
     "status_green": "#198754",
+    "status_amber": "#D97706",
 }
 
 
@@ -113,8 +114,8 @@ def set_window_icon(window):
         pass
 
 
-def get_vault_logo_image(size=(52, 52)):
-    """Return a CTkImage of the copper bank vault door logo."""
+def get_vault_logo_image(size=(58, 58)):
+    """Return a CTkImage of the copper bank vault door logo with resilient fallback."""
     png = get_asset_path("crypton.png")
     if os.path.isfile(png):
         try:
@@ -122,7 +123,12 @@ def get_vault_logo_image(size=(52, 52)):
             pil_img = Image.open(png)
             return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
         except Exception:
-            pass
+            try:
+                import tkinter as tk
+                scale = max(1, int(round(512 / max(size[0], 1))))
+                return tk.PhotoImage(file=png).subsample(scale, scale)
+            except Exception:
+                pass
     return None
 
 
@@ -143,6 +149,8 @@ class CryptonApp(ctk.CTk):
         self.drive_path = os.path.abspath(initial_dir)
         self.mvk = None
         self.mountpoint = None
+        self.read_only = False
+        self._poll_job = None
         self.gdrive_auth = GDriveAuth()
 
         # Clean exit hook: ensure virtual filesystem is unmounted when closing
@@ -362,6 +370,19 @@ class CryptonApp(ctk.CTk):
         self.entry_unlock_pwd.pack(pady=8)
         self.entry_unlock_pwd.bind("<Return>", lambda e: self.handle_unlock())
 
+        self.var_read_only = ctk.BooleanVar(value=False)
+        self.chk_read_only = ctk.CTkCheckBox(
+            self.content_container,
+            text="Mount as Read-Only (Paranoia Mode)",
+            variable=self.var_read_only,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=THEME["text_dark"],
+            fg_color=THEME["primary"],
+            hover_color=THEME["primary_hover"],
+            border_color=THEME["entry_border"],
+        )
+        self.chk_read_only.pack(pady=(2, 6))
+
         self.lbl_unlock_status = ctk.CTkLabel(
             self.content_container, text="", font=ctk.CTkFont(size=12)
         )
@@ -398,6 +419,7 @@ class CryptonApp(ctk.CTk):
         if not pwd:
             return
 
+        read_only = bool(self.var_read_only.get()) if hasattr(self, "var_read_only") else False
         self.btn_unlock.configure(state="disabled")
         self.lbl_unlock_status.configure(
             text="Unlocking & verifying vault...", text_color=THEME["text_muted"]
@@ -411,10 +433,10 @@ class CryptonApp(ctk.CTk):
                 # 2. Automatic Self-Healing: clean any broken records silently
                 VaultManager.verify_and_repair_vault(self.drive_path, mvk)
 
-                # 3. Mount transparent filesystem
-                mountpoint, _ = VaultMountService.mount(self.drive_path, mvk)
+                # 3. Mount transparent filesystem (with optional read-only paranoia mode)
+                mountpoint, _ = VaultMountService.mount(self.drive_path, mvk, read_only=read_only)
 
-                self.after(0, lambda: self.on_unlock_success(mvk, mountpoint))
+                self.after(0, lambda: self.on_unlock_success(mvk, mountpoint, read_only=read_only))
             except InvalidPasswordError:
                 self.after(0, self.on_unlock_bad_password)
             except Exception as e:
@@ -422,9 +444,10 @@ class CryptonApp(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def on_unlock_success(self, mvk: bytes, mountpoint: str):
+    def on_unlock_success(self, mvk: bytes, mountpoint: str, read_only: bool = False):
         self.mvk = mvk
         self.mountpoint = mountpoint
+        self.read_only = bool(read_only)
         self.refresh_state()
         # Note: Do not auto-open file manager on unlock per user preference
 
@@ -451,7 +474,20 @@ class CryptonApp(ctk.CTk):
             font=ctk.CTkFont(size=20, weight="bold"),
             text_color=THEME["status_green"],
         )
-        title.pack(pady=(0 if logo else 20, 4))
+        title.pack(pady=(0 if logo else 20, 2))
+
+        if getattr(self, "read_only", False):
+            badge_ro = ctk.CTkLabel(
+                self.content_container,
+                text="🛡️ READ-ONLY MODE ACTIVE (PARANOIA PROTECTION)",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color="#D97706",
+                text_color="#FFFFFF",
+                corner_radius=6,
+                height=24,
+                width=320,
+            )
+            badge_ro.pack(pady=(2, 6))
 
         path_lbl = ctk.CTkLabel(
             self.content_container,
@@ -459,16 +495,40 @@ class CryptonApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
             text_color=THEME["text_muted"],
         )
-        path_lbl.pack(pady=(0, 10))
+        path_lbl.pack(pady=(0, 6))
+
+        # Real-time Write-Back Flush Progress & USB Safe-to-Unplug Telemetry
+        self.flush_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.flush_frame.pack(fill="x", padx=40, pady=(2, 6))
+
+        self.lbl_flush_status = ctk.CTkLabel(
+            self.flush_frame,
+            text="✔ All Data Flushed to USB — Safe to Lock / Unplug",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=THEME["status_green"],
+        )
+        self.lbl_flush_status.pack(pady=(0, 2))
+
+        self.progress_flush = ctk.CTkProgressBar(
+            self.flush_frame,
+            width=260,
+            height=8,
+            fg_color=THEME["entry_bg"],
+            progress_color=THEME["status_green"],
+        )
+        self.progress_flush.set(1.0)
+        self.progress_flush.pack(pady=(0, 2))
+
+        self._start_flush_polling()
 
         tip = ctk.CTkLabel(
             self.content_container,
             text="Use your file manager to drag & drop, view, or edit files.\nEverything is encrypted transparently on the fly.",
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=11),
             text_color=THEME["text_muted"],
             justify="center",
         )
-        tip.pack(pady=(0, 18))
+        tip.pack(pady=(0, 12))
 
         # Main Actions (Minimalist: Open Folder + Lock Drive)
         btn_open = ctk.CTkButton(
@@ -478,24 +538,24 @@ class CryptonApp(ctk.CTk):
             fg_color=THEME["primary"],
             hover_color=THEME["primary_hover"],
             text_color="#FFFFFF",
-            height=42,
+            height=40,
             width=260,
             command=self.open_file_manager,
         )
-        btn_open.pack(pady=5)
+        btn_open.pack(pady=4)
 
-        btn_lock = ctk.CTkButton(
+        self.btn_lock = ctk.CTkButton(
             self.content_container,
             text="Lock & Safely Close",
             font=ctk.CTkFont(size=14, weight="bold"),
             fg_color=THEME["danger"],
             hover_color=THEME["danger_hover"],
             text_color="#FFFFFF",
-            height=42,
+            height=40,
             width=260,
             command=self.handle_lock,
         )
-        btn_lock.pack(pady=5)
+        self.btn_lock.pack(pady=4)
 
         # Subtle Optional Cloud Sync
         btn_gdrive = ctk.CTkButton(
@@ -523,15 +583,94 @@ class CryptonApp(ctk.CTk):
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to open file manager: {e}")
 
+    def _start_flush_polling(self):
+        if self._poll_job:
+            try:
+                self.after_cancel(self._poll_job)
+            except Exception:
+                pass
+            self._poll_job = None
+        self._poll_flush_status()
+
+    def _poll_flush_status(self):
+        if self.mvk is None:
+            return
+
+        try:
+            status = VaultMountService.get_flush_status()
+            if status.get("is_flushing", False):
+                pct = status.get("progress_pct", 0.0)
+                pending = status.get("pending_chunks", 0)
+                if hasattr(self, "progress_flush") and self.progress_flush.winfo_exists():
+                    self.progress_flush.configure(progress_color=THEME["danger"])
+                    self.progress_flush.set(pct / 100.0)
+                if hasattr(self, "lbl_flush_status") and self.lbl_flush_status.winfo_exists():
+                    self.lbl_flush_status.configure(
+                        text=f"⚡ Syncing to USB: {pct}% ({pending} chunks left) — DO NOT UNPLUG",
+                        text_color=THEME["danger"],
+                    )
+            else:
+                if hasattr(self, "progress_flush") and self.progress_flush.winfo_exists():
+                    self.progress_flush.configure(progress_color=THEME["status_green"])
+                    self.progress_flush.set(1.0)
+                if hasattr(self, "lbl_flush_status") and self.lbl_flush_status.winfo_exists():
+                    self.lbl_flush_status.configure(
+                        text="✔ All Data Flushed to USB — Safe to Lock / Unplug",
+                        text_color=THEME["status_green"],
+                    )
+        except Exception:
+            pass
+
+        self._poll_job = self.after(150, self._poll_flush_status)
+
     def handle_lock(self):
-        if self.mountpoint:
-            VaultMountService.unmount(self.mountpoint)
-            self.mountpoint = None
+        try:
+            if hasattr(self, "btn_lock") and self.btn_lock.winfo_exists():
+                self.btn_lock.configure(state="disabled", text="Locking & Securing...")
 
-        if hasattr(self, "gdrive_auth") and self.gdrive_auth:
-            self.gdrive_auth.wipe_credentials()
+            if self._poll_job:
+                try:
+                    self.after_cancel(self._poll_job)
+                except Exception:
+                    pass
+                self._poll_job = None
 
-        self.mvk = None
+            if hasattr(self, "lbl_flush_status") and self.lbl_flush_status.winfo_exists():
+                self.lbl_flush_status.configure(
+                    text="Safely unmounting filesystem and purging keys...",
+                    text_color=THEME.get("status_amber", "#D97706"),
+                )
+
+            def _worker():
+                try:
+                    # Drain any active background flushes up to 15s
+                    for _ in range(100):
+                        st = VaultMountService.get_flush_status()
+                        if not st.get("is_flushing", False):
+                            break
+                        time.sleep(0.15)
+
+                    # Unmount transparent filesystem
+                    if self.mountpoint:
+                        VaultMountService.unmount(self.mountpoint)
+                        self.mountpoint = None
+
+                    if hasattr(self, "gdrive_auth") and self.gdrive_auth:
+                        self.gdrive_auth.wipe_credentials()
+
+                    self.mvk = None
+                    self.read_only = False
+                except Exception as e:
+                    print(f"[Crypton Lock Error] {e}", file=sys.stderr)
+                finally:
+                    self.after(0, self._on_lock_complete)
+
+            threading.Thread(target=_worker, daemon=True).start()
+        except Exception as e:
+            print(f"[Crypton Handle Lock Error] {e}", file=sys.stderr)
+            self._on_lock_complete()
+
+    def _on_lock_complete(self):
         self.refresh_state()
         messagebox.showinfo("Vault Locked", "Your files have been safely encrypted and unmounted.")
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crypton"
-version = "0.1.0"
+version = "1.1.0"
 description = "Secure Cross-Platform USB Vault and Google Drive Sync Tool"
 authors = [{ name = "Crypton Team" }]
 readme = "README.md"
@@ -20,6 +20,8 @@ dependencies = [
     "google-api-python-client>=2.100.0",
     "google-auth-oauthlib>=1.0.0",
     "google-auth-httplib2>=0.1.0",
+    "wsgidav>=4.3.0",
+    "cheroot>=10.0.0",
 ]
 
 
